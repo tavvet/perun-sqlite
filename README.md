@@ -1,5 +1,8 @@
 # perun-sqlite
 
+[![CI](https://github.com/tavvet/perun-sqlite/actions/workflows/ci.yml/badge.svg)](https://github.com/tavvet/perun-sqlite/actions/workflows/ci.yml)
+[![Documentation](https://github.com/tavvet/perun-sqlite/actions/workflows/docs.yml/badge.svg)](https://tavvet.github.io/perun-sqlite/documentation/perunsqlite/)
+
 **The SQLite driver for the [Perun](#part-of-the-perun-framework) framework** — a thin, typed,
 async/await wrapper over `libsqlite3`. It mirrors the public surface of
 [perun-pgsql](../perun-pgsql) (its PostgreSQL sibling) wherever an embedded engine makes it
@@ -181,10 +184,25 @@ Tests/PerunTests/     value/type/result/error unit tests + connection/pool/extra
 
 ## Status
 
-The driver is complete and verified: `swift test` (35 tests) and `swift run perun-demo` both pass
-end to end against in-memory and temporary-file databases. The public surface is deliberately
-general — it runs SQL and returns typed rows. Query building, models and migrations are concerns for
-code built *on top* of the driver, not for the driver itself.
+`0.x` — pre-1.0, so the API may still change. The driver is complete and verified: `swift test`
+(46 tests) and `swift run perun-demo` pass end to end against in-memory and temporary-file databases,
+on both macOS (SQLite 3.51) and Linux (SQLite 3.45). The public surface is deliberately general — it
+runs SQL and returns typed rows. Query building, models and migrations are concerns for code built
+*on top* of the driver, not for the driver itself.
+
+## Limitations
+
+Deliberate scope choices, not bugs — most are the ORM's job, or a later release:
+
+- **Positional parameters only** (`?`). Named parameters (`:name`, `$name`) aren't bound yet.
+- **Scalar custom functions only** — `createFunction` registers scalar functions, not aggregates or
+  window functions.
+- **Integer types** are `Int` / `Int16` / `Int32` / `Int64` (mirroring perun-pgsql); a `UInt64`
+  above `Int64.max` has no faithful SQLite integer representation.
+- **One task per connection** — a `SQLiteConnection` isn't meant to be driven concurrently; use the
+  pool (`SQLiteClient`) for that. See [the concurrency note](#a-note-on-concurrency).
+- **No object mapping** — rows decode to Swift values, not to your model types. That mapping, query
+  building, and migrations belong to a layer built on top.
 
 ## License
 

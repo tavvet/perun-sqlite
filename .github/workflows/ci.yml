@@ -1,0 +1,37 @@
+name: CI
+
+# Build and test on every push to main and every pull request, on Linux and macOS.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SQLite
+        run: apt-get update && apt-get install -y libsqlite3-dev pkg-config
+      - run: swift --version
+      - run: swift build
+      - run: swift test
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SQLite (keg-only) and pkg-config
+        run: brew install pkg-config sqlite
+      - name: Point pkg-config at the keg-only SQLite
+        run: echo "PKG_CONFIG_PATH=$(brew --prefix sqlite)/lib/pkgconfig" >> "$GITHUB_ENV"
+      - run: swift --version
+      - run: swift build
+      - run: swift test
