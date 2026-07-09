@@ -189,6 +189,10 @@ libsqlite3 (blocking C)
 `SQLITE_DONE`, возвращается **последний** result-set. Аналог simple-query pgsql. Каждый оператор —
 свой autocommit (не атомарно между собой; для атомарности — `withTransaction`).
 
+`rowsAffected` считается через `perunRowsAffected` (`sqlite3_stmt_readonly`): для read-only оператора
+(`SELECT`) — `0` (иначе он отражал бы `sqlite3_changes` предыдущего DML), для DML (в т.ч.
+`INSERT…RETURNING`, который не read-only) — реальное число изменённых строк.
+
 ### Параметризованный — `query(_ sql:_ parameters:)`
 
 `perunRunSingleStatement`: **ровно один** оператор, биндинг параметров, степпинг, сбор строк.
@@ -291,8 +295,13 @@ Generation-guard (`runningOpGeneration == generation`) не даёт поздн�
 
 Foundation (`FoundationTypes.swift`): `Data`↔blob; `UUID`↔TEXT(uuidString) или blob(16);
 `Date`→TEXT ISO-8601 (декод из TEXT/INTEGER-unix/REAL-julian; civil-days арифметика перенесена из
-perun-pgsql); `Decimal`↔TEXT (точность). `SQLiteJSON` (`JSON.swift`) — тонкая TEXT-обёртка.
-`SQLiteValue` сам `SQLiteEncodable` — escape hatch для точного контроля storage-класса.
+perun-pgsql). Текстовый парсер `parseSQLiteDate` терпим к формам `datetime()`: `HH:MM` без секунд,
+компактное смещение `±HHMM` без двоеточия, «лишние» дробные цифры сверх 9. `Decimal`↔TEXT (точность).
+`SQLiteJSON` (`JSON.swift`) — тонкая TEXT-обёртка. `SQLiteValue` сам `SQLiteEncodable` — escape hatch
+для точного контроля storage-класса.
+
+`ColumnMetadata`/`SQLiteCell`/`SQLiteRow`/`QueryResult` — `Equatable` (удобно для тестов; возможно,
+т.к. `SQLiteValue` уже `Equatable`). `QueryResult.first` — шорткат к первой строке.
 
 ## Extras
 

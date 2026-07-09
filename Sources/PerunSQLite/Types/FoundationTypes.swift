@@ -161,25 +161,30 @@ func parseSQLiteDate(_ string: String) -> Date? {
         || (scalars[index] == 0x20 && index + 1 < scalars.count && isDigit(scalars[index + 1])) {
         index += 1
         guard let h = readInt(maxDigits: 2), expect(0x3a),          // ':'
-              let m = readInt(maxDigits: 2), expect(0x3a),
-              let s = readInt(maxDigits: 2) else { return nil }
-        hour = h; minute = m; second = s
+              let m = readInt(maxDigits: 2) else { return nil }
+        hour = h; minute = m
+        if expect(0x3a) {                                           // ':SS' is optional (SQLite allows HH:MM)
+            guard let s = readInt(maxDigits: 2) else { return nil }
+            second = s
+        }
 
         if expect(0x2e) {                                           // '.frac'
             let start = index
             guard let frac = readInt(maxDigits: 9) else { return nil }
             let digits = index - start
             fractional = Double(frac) / pow(10.0, Double(digits))
+            while index < scalars.count, isDigit(scalars[index]) { index += 1 }   // ignore sub-ns excess
         }
 
-        // Optional timezone offset: ±HH[:MM[:SS]] or 'Z'.
+        // Optional timezone offset: ±HH[[:]MM[[:]SS]] or 'Z' — the colons are optional (e.g. +0530).
         if index < scalars.count, scalars[index] == 0x2b || scalars[index] == 0x2d {
             let negative = scalars[index] == 0x2d
             index += 1
             guard let oh = readInt(maxDigits: 2) else { return nil }
-            var om = 0, os = 0
-            if expect(0x3a) { om = readInt(maxDigits: 2) ?? 0 }
-            if expect(0x3a) { os = readInt(maxDigits: 2) ?? 0 }
+            _ = expect(0x3a)
+            let om = readInt(maxDigits: 2) ?? 0
+            _ = expect(0x3a)
+            let os = readInt(maxDigits: 2) ?? 0
             let magnitude = oh * 3600 + om * 60 + os
             offsetSeconds = negative ? -magnitude : magnitude
         } else if index < scalars.count, scalars[index] == 0x5a {  // 'Z'

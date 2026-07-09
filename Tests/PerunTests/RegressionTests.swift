@@ -92,4 +92,79 @@ final class RegressionTests: XCTestCase {
         XCTAssertEqual(value, 42)
         try await reopened.close()
     }
+
+    // Date parser accepts external forms SQLite's own datetime() can produce.
+    func testDateParserAcceptsExternalForms() throws {
+        func seconds(_ text: String) throws -> Double {
+            try Date.decode(from: .text(text)).timeIntervalSince1970
+        }
+        // HH:MM without seconds == HH:MM:SS.
+        XCTAssertEqual(try seconds("2025-07-09 12:30"),
+                       try seconds("2025-07-09 12:30:00"), accuracy: 0.0005)
+        // Compact offset ±HHMM == ±HH:MM, and the offset is actually applied.
+        XCTAssertEqual(try seconds("2025-07-09 12:00:00+0530"),
+                       try seconds("2025-07-09 12:00:00+05:30"), accuracy: 0.0005)
+        XCTAssertEqual(try seconds("2025-07-09 12:00:00+0530"),
+                       try seconds("2025-07-09 06:30:00Z"), accuracy: 0.0005)
+        // More than 9 fractional digits: excess ignored, not rejected.
+        XCTAssertEqual(try seconds("2025-07-09 12:00:00.123456789123"),
+                       try seconds("2025-07-09 12:00:00.123456789"), accuracy: 0.0005)
+    }
+
+    // rowsAffected is 0 for a read-only statement (SELECT), but correct for INSERT … RETURNING.
+    func testRowsAffectedReadonlyVsReturning() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.query("CREATE TABLE t (v INTEGER)")
+
+        let insert = try await conn.query("INSERT INTO t VALUES (?), (?), (?)", [1, 2, 3])
+        XCTAssertEqual(insert.rowsAffected, 3)
+
+        let select = try await conn.query("SELECT * FROM t")
+        XCTAssertEqual(select.rowsAffected, 0)          // was reporting the prior INSERT's 3
+
+        let returning = try await conn.query("INSERT INTO t VALUES (99) RETURNING v")
+        XCTAssertEqual(returning.rowsAffected, 1)       // RETURNING is not read-only
+        XCTAssertEqual(try returning.first?.decode("v", as: Int.self), 99)
+    }
+
+    // A nested withTransaction fails (SQLite has no nested transactions) but leaves the outer
+    // transaction usable — its context is saved and restored.
+    func testNestedTransactionLeavesOuterUsable() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.query("CREATE TABLE t (v INTEGER)")
+
+        try await conn.withTransaction { tx in
+            try await tx.query("INSERT INTO t VALUES (1)")
+            do {
+                try await conn.withTransaction { inner in
+                    try await inner.query("INSERT INTO t VALUES (2)")
+                }
+                XCTFail("a nested transaction should fail")
+            } catch {
+                // expected: SQLite rejects a transaction within a transaction
+            }
+            try await tx.query("INSERT INTO t VALUES (3)")   // outer still works after the nested failure
+        }
+
+        let values = try await conn.query("SELECT v FROM t ORDER BY v").rows
+            .map { try $0.decode("v", as: Int.self) }
+        XCTAssertEqual(values, [1, 3])
+    }
+
+    // Result types are Equatable.
+    func testResultTypesEquatable() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.query("CREATE TABLE t (v INTEGER, name TEXT)")
+        try await conn.query("INSERT INTO t VALUES (1, 'a')")
+
+        let a = try await conn.query("SELECT v, name FROM t")
+        let b = try await conn.query("SELECT v, name FROM t")
+        XCTAssertEqual(a, b)
+        XCTAssertEqual(a.first, b.first)
+        XCTAssertEqual(a.columns, b.columns)
+        XCTAssertEqual(a.first?["v"], b.first?["v"])
+    }
 }

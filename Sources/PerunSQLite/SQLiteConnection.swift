@@ -378,6 +378,10 @@ public actor SQLiteConnection {
     }
 
     /// Compile a statement for repeated execution.
+    ///
+    /// The compiled statement lives on the connection until you `closePrepared` it (or the
+    /// connection closes). Call `closePrepared` when done — especially before returning a pooled
+    /// connection, so the compiled statement doesn't ride along to the next borrower.
     public func prepare(_ sql: String) async throws -> PreparedStatement {
         try ensureOpen()
         return try await _prepare(sql)
@@ -402,15 +406,20 @@ public actor SQLiteConnection {
     /// Run `body` inside a SQL transaction. `BEGIN` runs first; `COMMIT` on success, `ROLLBACK` if
     /// `body` throws. Transaction control (BEGIN/COMMIT/ROLLBACK) runs uninterruptibly, so a
     /// timed-out transaction still rolls back cleanly rather than leaving one open.
+    ///
+    /// SQLite has no nested transactions, so calling this again on the same connection while a
+    /// transaction is open throws (its `BEGIN` is rejected) — but the outer transaction's context
+    /// is saved and restored, so it stays usable afterward. Use `SAVEPOINT` SQL if you need nesting.
     public func withTransaction<T: Sendable>(
         kind: TransactionKind = .deferred,
         _ body: @Sendable (Transaction) async throws -> T
     ) async throws -> T {
         try ensureOpen()
+        let previousContext = activeTransactionContext
         transactionContextCounter += 1
         let contextID = transactionContextCounter
         activeTransactionContext = contextID
-        defer { activeTransactionContext = nil }
+        defer { activeTransactionContext = previousContext }
 
         try await _execUninterruptible(kind.beginSQL)
         do {
@@ -677,7 +686,7 @@ public actor SQLiteConnection {
                 case SQLITE_DONE:
                     let result = QueryResult(columns: columns,
                                              values: values,
-                                             rowsAffected: Int(sqlite3_changes(db.db)),
+                                             rowsAffected: perunRowsAffected(stmt, db.db),
                                              lastInsertRowID: sqlite3_last_insert_rowid(db.db))
                     sqlite3_reset(stmt)
                     return result
@@ -776,6 +785,13 @@ func perunReadRow(_ stmt: OpaquePointer, _ columnCount: Int32) -> [SQLiteValue] 
     return values
 }
 
+/// Rows changed by `stmt` — `0` for a read-only statement (e.g. a `SELECT`), so a `SELECT` result
+/// doesn't report an earlier DML's connection-global `sqlite3_changes`. An `INSERT`/`UPDATE`/
+/// `DELETE` — including a `RETURNING` form, which is not read-only — reports its real change count.
+func perunRowsAffected(_ stmt: OpaquePointer, _ db: OpaquePointer) -> Int {
+    sqlite3_stmt_readonly(stmt) != 0 ? 0 : Int(sqlite3_changes(db))
+}
+
 /// Bind an array of encodable parameters to a compiled statement, positionally (`?1…?n`).
 func perunBindParameters(_ parameters: [(any SQLiteEncodable)?],
                          to stmt: OpaquePointer,
@@ -831,6 +847,7 @@ private func perunBindBlob(_ stmt: OpaquePointer, _ index: Int32, _ bytes: [UInt
 func perunRunMultiStatement(_ sql: String, db: OpaquePointer) throws -> QueryResult {
     var lastColumns: [ColumnMetadata] = []
     var lastValues: [[SQLiteValue]] = []
+    var lastStatementReadonly = true      // an empty batch changed nothing
 
     try sql.withCString { start in
         var cursor: UnsafePointer<CChar>? = start
@@ -856,12 +873,13 @@ func perunRunMultiStatement(_ sql: String, db: OpaquePointer) throws -> QueryRes
             }
             lastColumns = columns
             lastValues = values
+            lastStatementReadonly = sqlite3_stmt_readonly(stmt) != 0
         }
     }
 
     return QueryResult(columns: lastColumns,
                        values: lastValues,
-                       rowsAffected: Int(sqlite3_changes(db)),
+                       rowsAffected: lastStatementReadonly ? 0 : Int(sqlite3_changes(db)),
                        lastInsertRowID: sqlite3_last_insert_rowid(db))
 }
 
@@ -911,7 +929,7 @@ func perunRunSingleStatement(_ sql: String,
         case SQLITE_DONE:
             return QueryResult(columns: columns,
                                values: values,
-                               rowsAffected: Int(sqlite3_changes(db)),
+                               rowsAffected: perunRowsAffected(stmt, db),
                                lastInsertRowID: sqlite3_last_insert_rowid(db))
         default:
             throw perunSQLiteError(db)

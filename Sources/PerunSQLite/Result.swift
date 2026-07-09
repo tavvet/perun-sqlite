@@ -1,5 +1,5 @@
 /// Metadata describing one column of a result set.
-public struct ColumnMetadata: Sendable {
+public struct ColumnMetadata: Sendable, Equatable {
     public let name: String
     /// The column's declared type from the schema (`sqlite3_column_decltype`), e.g. `"INTEGER"`,
     /// `"TEXT"`, `"VARCHAR(50)"`. `nil` for expression columns (`SELECT a + b`): SQLite reports a
@@ -18,7 +18,7 @@ public struct ColumnMetadata: Sendable {
 ///
 /// Decode it with `decode(_:)` / `decodeIfPresent(_:)`. The `string()`/`int()`/… helpers are
 /// convenience shortcuts over the same decoders.
-public struct SQLiteCell: Sendable {
+public struct SQLiteCell: Sendable, Equatable {
     /// The typed value held by this cell.
     public let value: SQLiteValue
     public let column: ColumnMetadata
@@ -39,7 +39,7 @@ public struct SQLiteCell: Sendable {
 }
 
 /// One row of a result set.
-public struct SQLiteRow: Sendable {
+public struct SQLiteRow: Sendable, Equatable {
     /// Column values in column order.
     public let values: [SQLiteValue]
     public let columns: [ColumnMetadata]
@@ -100,7 +100,7 @@ public struct SQLiteRow: Sendable {
 }
 
 /// The outcome of running one SQL statement.
-public struct QueryResult: Sendable {
+public struct QueryResult: Sendable, Equatable {
     public let columns: [ColumnMetadata]
     public let rows: [SQLiteRow]
     /// Rows changed by the statement (`sqlite3_changes`) — for `INSERT`/`UPDATE`/`DELETE`. `0`
