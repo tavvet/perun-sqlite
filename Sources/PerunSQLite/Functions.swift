@@ -28,14 +28,14 @@ extension SQLiteConnection {
     ///
     /// - Parameters:
     ///   - name: the SQL function name.
-    ///   - argumentCount: the exact number of arguments, or `-1` for variadic.
+    ///   - argumentCount: the exact number of arguments, or `nil` for variadic (any arity).
     ///   - deterministic: whether the function returns the same result for the same inputs (lets
     ///     SQLite use it in more contexts, e.g. indexes on expressions).
     ///   - implementation: maps the argument values to a result. Throwing surfaces to SQL as a
     ///     function error.
     public func createFunction(
         _ name: String,
-        argumentCount: Int32 = -1,
+        argumentCount: Int? = nil,
         deterministic: Bool = false,
         _ implementation: @escaping @Sendable ([SQLiteValue]) throws -> SQLiteValue
     ) async throws {
@@ -43,10 +43,11 @@ extension SQLiteConnection {
         let box = FunctionBox(implementation)
         let db = handle
         let functionName = name
-        let argCount = argumentCount
+        let argCount = argumentCount.map(Int32.init) ?? -1      // SQLite's -1 = variadic
         let isDeterministic = deterministic
 
         let rc: Int32 = try await withBlockingIO(on: ioQueue) {
+            guard !db.closed else { throw PerunError.connectionClosed }
             // Hand ownership of the box to SQLite; the xDestroy callback releases it (on close, on
             // replacement, or if registration fails).
             let context = Unmanaged.passRetained(box).toOpaque()

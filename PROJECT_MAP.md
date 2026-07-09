@@ -138,6 +138,11 @@ libsqlite3 (blocking C)
   единственной serial `ioQueue`, поэтому указатель никогда не трогается конкурентно. В
   `withBlockingIO`-замыкания захватываются только эти боксы (локальный `let db = handle` на акторе),
   никогда `self.*`.
+- **Флаг `SQLiteHandle.closed`** закрывает окно use-after-free между `close()` и in-flight
+  операцией: `isClosed`/`ensureOpen()` живёт на акторе и не упорядочен против освобождения хендла на
+  `ioQueue`. Поэтому `closed` ставится **на `ioQueue`** прямо перед `sqlite3_close_v2`, а каждый
+  ioQueue-блок, разыменовывающий `db.db` без stmt-гварда, сначала проверяет `guard !db.closed` —
+  проверка сериализована с close на той же очереди.
 - **Нет отдельного wire-lock** (в отличие от pgsql): у SQLite нет общего провода и пайплайнинга.
   Соединение рассчитано на **одну логическую задачу за раз**: не запускать другие запросы на том же
   соединении во время `withTransaction`/`queryStream`. Для конкурентности — пул (`SQLiteClient`),
@@ -163,7 +168,16 @@ libsqlite3 (blocking C)
 ### Close — `close()`
 
 Идемпотентно: снять update-hook (до освобождения box), финализировать все prepared-стейтменты и
-стримы, `sqlite3_close_v2`, завершить change-стрим, обнулить box.
+стримы, поставить `db.closed = true` (на `ioQueue`, перед освобождением), `sqlite3_close_v2`,
+завершить change-стрим, обнулить box.
+
+### `deinit` — safety net
+
+Если соединение (или пул без `shutdown()`) брошено без `close()`, `deinit` дублирует уборку
+`close()`: завершает change-стрим и на `ioQueue` финализирует стейтменты + `sqlite3_close_v2`, иначе
+утекли бы `sqlite3 *`, файловый дескриптор, компилированные стейтменты и FunctionBox'ы. Зеркалит
+`deinit` из `PostgresConnection`. На деструкции других ссылок нет, поэтому гонок с in-flight-операцией
+не бывает.
 
 ## Query Execution
 
@@ -177,7 +191,10 @@ libsqlite3 (blocking C)
 
 ### Параметризованный — `query(_ sql:_ parameters:)`
 
-`perunRunSingleStatement`: один оператор, биндинг параметров, степпинг, сбор строк.
+`perunRunSingleStatement`: **ровно один** оператор, биндинг параметров, степпинг, сбор строк.
+Компиляция идёт через `perunCompileSingle`, который отвергает «хвост» (второй оператор после `;`) как
+`PerunError.multipleStatements` — иначе он молча терялся бы (в отличие от мультистейтментного
+`query(_:)`). То же для `prepare`/`queryStream`. Whitespace/комментарий в хвосте — не оператор.
 
 ### Биндинг — `perunBindParameters`
 
@@ -252,13 +269,15 @@ Generation-guard (`runningOpGeneration == generation`) не даёт поздн�
   (primary==19), `isBusy` (5/6).
 - `SQLiteError { resultCode; extendedCode; message }` из `sqlite3_extended_errcode`/`sqlite3_errmsg`
   — аналог `PostgresServerError`.
-- `PerunError` (урезанный зеркальный enum): `connectionFailed`, `connectionClosed`,
+- `PerunError` (урезанный зеркальный enum, `Equatable`): `connectionFailed`, `connectionClosed`,
   `sqlite(SQLiteError)`, `unexpectedNull`, `columnNotFound`, `decodingFailed`,
-  `parameterCountMismatch`, `preparedStatementConnectionMismatch`, `invalidTransactionContext`,
-  `clientShutdown`, `timedOut`. Плюс `sqliteError` accessor и `shouldDiscardConnection` —
-  исчерпывающий switch (аналог `mayHaveDesynchronizedWire`): discard для connectionClosed/
-  connectionFailed и sqlite-кодов corrupt/ioError/notADatabase/cantOpen/noMemory; constraint/misuse/
-  decode/local — соединение остаётся пригодным.
+  `parameterCountMismatch`, `multipleStatements`, `preparedStatementConnectionMismatch`,
+  `invalidTransactionContext`, `clientShutdown`, `timedOut`. Плюс `sqliteError` accessor и
+  `shouldDiscardConnection` — исчерпывающий switch (аналог `mayHaveDesynchronizedWire`). **Важно**:
+  классификация sqlite-ошибок идёт по **primary-коду** (`primaryCode ∈ {7,10,11,14,26}` = NOMEM/
+  IOERR/CORRUPT/CANTOPEN/NOTADB), а не по именованным кейсам: extended-коды включены, поэтому реальная
+  I/O/corruption-ошибка приходит как `.other(266)` и по именам не поймалась бы. `SQLiteError` тоже
+  `Equatable`.
 
 ## Type System
 
@@ -284,9 +303,13 @@ perun-pgsql); `Decimal`↔TEXT (точность). `SQLiteJSON` (`JSON.swift`) �
   LISTEN/NOTIFY.
 - **Backup** (`Backup.swift`): `backup(to:sourceName:destinationName:)` через
   `sqlite3_backup_init/step(-1)/finish` на очереди источника; получает handle назначения через
-  внутренний `rawHandle()`. Назначение не должно использоваться конкурентно во время бэкапа.
-- **Functions** (`Functions.swift`): `createFunction(_:argumentCount:deterministic:_:)` через
-  `sqlite3_create_function_v2`. xFunc/xDestroy — `@convention(c)`-замыкания без захвата, зовущие
+  внутренний `rawHandle()`. Контракт (нельзя полностью проверить между двумя соединениями):
+  назначение должно быть **эксклюзивно** во время бэкапа (иначе две очереди трогают один `sqlite3 *`
+  — безопасно только в serialized-режиме SQLite). Best-effort гвард `!source.closed && !dest.closed`
+  на очереди сужает окно закрытия.
+- **Functions** (`Functions.swift`): `createFunction(_:argumentCount:deterministic:_:)`
+  (`argumentCount: Int?`, `nil` = variadic) через `sqlite3_create_function_v2`. xFunc/xDestroy —
+  `@convention(c)`-замыкания без захвата, зовущие
   глобальные хелперы; замыкание пользователя — в `FunctionBox` (`passRetained`, освобождается
   xDestroy при close/replace/ошибке регистрации). Аргументы читаются из `sqlite3_value_*`, результат
   ставится `sqlite3_result_*`; throw → `sqlite3_result_error`.
@@ -308,6 +331,9 @@ perun-pgsql); `Decimal`↔TEXT (точность). `SQLiteJSON` (`JSON.swift`) �
   shutdown, lifetime-ресайклинг.
 - `ExtrasTests` — custom functions (+throw), data-change hooks, online backup, timeout через
   interrupt.
+- `RegressionTests` — фиксы из ревью: пустой blob → пустой BLOB (не NULL); отклонение
+  мультистейтмента в single-путях; фабрика `.uri` + shared-cache in-memory; консистентность после
+  drop без `close()` (safety-net `deinit`).
 
 ## Local Verification
 

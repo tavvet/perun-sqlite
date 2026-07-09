@@ -177,7 +177,7 @@ public enum SQLiteResultCode: Sendable, Equatable, Hashable {
 ///
 /// Analogous to perun-pgsql's `PostgresServerError`: it pairs the typed `resultCode` (the stable
 /// signal to branch on) with the raw extended integer and the human-readable message.
-public struct SQLiteError: Error, Sendable, CustomStringConvertible {
+public struct SQLiteError: Error, Sendable, Equatable, CustomStringConvertible {
     /// The extended result code as a typed condition — branch on this.
     public let resultCode: SQLiteResultCode
     /// The raw extended result code integer (`sqlite3_extended_errcode`). Escape hatch for codes
@@ -213,7 +213,7 @@ public struct SQLiteError: Error, Sendable, CustomStringConvertible {
 /// The trimmed mirror of perun-pgsql's `PerunError`: the wire / auth / TLS / COPY cases are gone
 /// (an embedded engine has none of those), and a structured engine failure arrives as
 /// `.sqlite(SQLiteError)` — the analogue of `.server(PostgresServerError)`.
-public enum PerunError: Error, CustomStringConvertible, Sendable {
+public enum PerunError: Error, CustomStringConvertible, Sendable, Equatable {
     /// The database could not be opened — bad path, permissions, or a corrupt file. Thrown by
     /// `connect`, before a usable handle exists.
     case connectionFailed(String)
@@ -229,6 +229,9 @@ public enum PerunError: Error, CustomStringConvertible, Sendable {
     case decodingFailed(type: String, storageClass: String, reason: String)
     /// The parameter array's length did not match the statement's `?` placeholder count.
     case parameterCountMismatch(expected: Int, got: Int)
+    /// A single-statement API (`query(_:_:)`, `prepare`, `queryStream`) was given SQL containing
+    /// more than one statement. Use `query(_:)` (no parameters) to run several statements.
+    case multipleStatements
     /// A prepared-statement handle was used on a different connection than the one that created
     /// it. Statements are scoped to their connection.
     case preparedStatementConnectionMismatch
@@ -257,6 +260,8 @@ public enum PerunError: Error, CustomStringConvertible, Sendable {
             return "could not decode \(type) from \(storageClass): \(reason)"
         case let .parameterCountMismatch(expected, got):
             return "parameter count mismatch: statement expects \(expected), got \(got)"
+        case .multipleStatements:
+            return "SQL contains more than one statement; use query(_:) to run several"
         case .preparedStatementConnectionMismatch:
             return "prepared statement belongs to a different connection"
         case .invalidTransactionContext:
@@ -290,15 +295,19 @@ extension PerunError {
         case .connectionClosed, .connectionFailed:
             return true
         case let .sqlite(error):
-            switch error.resultCode {
-            case .corrupt, .ioError, .notADatabase, .cantOpen, .noMemory:
+            // Classify on the PRIMARY code, not the named enum cases: extended result codes are
+            // enabled (`sqlite3_extended_result_codes`), so a real I/O or corruption failure
+            // arrives as an *extended* code (e.g. SQLITE_IOERR_READ = 266, SQLITE_CORRUPT_VTAB =
+            // 267) that would fall through named cases like `.ioError`/`.corrupt` into `.other`.
+            switch error.primaryCode {
+            case 7, 10, 11, 14, 26:      // NOMEM, IOERR, CORRUPT, CANTOPEN, NOTADB
                 return true
             default:
                 return false
             }
         case .unexpectedNull, .columnNotFound, .decodingFailed, .parameterCountMismatch,
-             .preparedStatementConnectionMismatch, .invalidTransactionContext, .clientShutdown,
-             .timedOut:
+             .multipleStatements, .preparedStatementConnectionMismatch, .invalidTransactionContext,
+             .clientShutdown, .timedOut:
             return false
         }
     }

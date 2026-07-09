@@ -34,6 +34,13 @@ func withBlockingIO<T: Sendable>(
 /// queue serializes the C calls, so the pointer is never touched concurrently.
 final class SQLiteHandle: @unchecked Sendable {
     let db: OpaquePointer
+    /// Set to `true` — on the `ioQueue`, immediately before `sqlite3_close_v2` — once the handle is
+    /// closed. Every `ioQueue` block that dereferences `db` checks this first, so the check is
+    /// serialized against the close on the same queue: a block enqueued after the close sees
+    /// `closed == true` and refuses, and a block enqueued before it ran before the free. This is
+    /// what closes the `close()`-vs-in-flight-operation use-after-free window (the actor-side
+    /// `isClosed`/`ensureOpen()` guard alone doesn't order against the queued free).
+    var closed = false
     init(_ db: OpaquePointer) { self.db = db }
 }
 

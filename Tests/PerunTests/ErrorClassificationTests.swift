@@ -24,20 +24,29 @@ final class ErrorClassificationTests: XCTestCase {
     }
 
     func testShouldDiscardConnection() {
-        // Doubtful-handle errors → discard.
+        // Doubtful-handle errors → discard. Bare primary codes…
         XCTAssertTrue(PerunError.connectionClosed.shouldDiscardConnection)
         XCTAssertTrue(PerunError.connectionFailed("x").shouldDiscardConnection)
         XCTAssertTrue(PerunError.sqlite(SQLiteError(extendedCode: 11, message: "corrupt")).shouldDiscardConnection)
         XCTAssertTrue(PerunError.sqlite(SQLiteError(extendedCode: 10, message: "io")).shouldDiscardConnection)
         XCTAssertTrue(PerunError.sqlite(SQLiteError(extendedCode: 26, message: "notadb")).shouldDiscardConnection)
+        XCTAssertTrue(PerunError.sqlite(SQLiteError(extendedCode: 7, message: "nomem")).shouldDiscardConnection)
+        XCTAssertTrue(PerunError.sqlite(SQLiteError(extendedCode: 14, message: "cantopen")).shouldDiscardConnection)
+        // …and the EXTENDED variants that actually occur at runtime (the classification must key on
+        // the primary code, or these fall through to `.other` and get wrongly kept).
+        XCTAssertTrue(PerunError.sqlite(SQLiteError(extendedCode: 266, message: "SQLITE_IOERR_READ")).shouldDiscardConnection)
+        XCTAssertTrue(PerunError.sqlite(SQLiteError(extendedCode: 778, message: "SQLITE_IOERR_WRITE")).shouldDiscardConnection)
+        XCTAssertTrue(PerunError.sqlite(SQLiteError(extendedCode: 267, message: "SQLITE_CORRUPT_VTAB")).shouldDiscardConnection)
+        XCTAssertTrue(PerunError.sqlite(SQLiteError(extendedCode: 526, message: "SQLITE_CANTOPEN_ISDIR")).shouldDiscardConnection)
 
-        // Everyday errors → keep the connection.
+        // Everyday errors → keep the connection. Constraint violations are extended codes too.
         XCTAssertFalse(PerunError.sqlite(SQLiteError(extendedCode: 2067, message: "unique")).shouldDiscardConnection)
         XCTAssertFalse(PerunError.sqlite(SQLiteError(extendedCode: 1, message: "generic")).shouldDiscardConnection)
         XCTAssertFalse(PerunError.unexpectedNull(column: "x").shouldDiscardConnection)
         XCTAssertFalse(PerunError.columnNotFound("x").shouldDiscardConnection)
         XCTAssertFalse(PerunError.decodingFailed(type: "Int", storageClass: "TEXT", reason: "").shouldDiscardConnection)
         XCTAssertFalse(PerunError.parameterCountMismatch(expected: 1, got: 0).shouldDiscardConnection)
+        XCTAssertFalse(PerunError.multipleStatements.shouldDiscardConnection)
         XCTAssertFalse(PerunError.timedOut.shouldDiscardConnection)
         XCTAssertFalse(PerunError.clientShutdown.shouldDiscardConnection)
     }

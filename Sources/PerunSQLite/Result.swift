@@ -134,4 +134,8 @@ public struct QueryResult: Sendable {
     }
 
     public var rowCount: Int { rows.count }
+
+    /// The first row, or `nil` if the result is empty — a shortcut for the common
+    /// fetch-one-row / fetch-a-count pattern (`try result.first?.decode("n", as: Int.self)`).
+    public var first: SQLiteRow? { rows.first }
 }

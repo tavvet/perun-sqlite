@@ -7,7 +7,7 @@ public enum JournalMode: String, Sendable {
 }
 
 /// How a transaction acquires its lock (`BEGIN DEFERRED` / `IMMEDIATE` / `EXCLUSIVE`).
-public enum TransactionKind: Sendable {
+public enum TransactionKind: Sendable, Equatable {
     /// Acquire a lock only when the transaction first reads or writes (the SQLite default).
     case deferred
     /// Acquire a write lock immediately, so a concurrent writer fails fast rather than at COMMIT.
@@ -84,6 +84,17 @@ public struct SQLiteConfiguration: Sendable {
                             create: Bool = true,
                             journalMode: JournalMode? = nil) -> SQLiteConfiguration {
         SQLiteConfiguration(path: path, readonly: readonly, create: create, journalMode: journalMode)
+    }
+
+    /// A database addressed by a URI filename (sets `enableURIFilenames`). Use this for a
+    /// shared-cache in-memory database that a pool can share across connections:
+    /// `.uri("file::memory:?cache=shared")`.
+    public static func uri(_ uri: String,
+                           readonly: Bool = false,
+                           create: Bool = true,
+                           journalMode: JournalMode? = nil) -> SQLiteConfiguration {
+        SQLiteConfiguration(path: uri, readonly: readonly, create: create,
+                            journalMode: journalMode, enableURIFilenames: true)
     }
 }
 
@@ -258,38 +269,52 @@ public actor SQLiteConnection {
     // MARK: - Introspection
 
     /// Whether the connection is currently inside an open transaction (`sqlite3_get_autocommit`).
+    /// Returns `false` on a closed connection.
     public var isInTransaction: Bool {
         get async {
             if isClosed { return false }
             let db = handle
-            return (try? await withBlockingIO(on: ioQueue) { sqlite3_get_autocommit(db.db) == 0 }) ?? false
+            return (try? await withBlockingIO(on: ioQueue) {
+                guard !db.closed else { throw PerunError.connectionClosed }
+                return sqlite3_get_autocommit(db.db) == 0
+            }) ?? false
         }
     }
 
-    /// The rowid of the most recent successful `INSERT` on this connection.
+    /// The rowid of the most recent successful `INSERT` on this connection. `0` if closed.
     public var lastInsertRowID: Int64 {
         get async {
             if isClosed { return 0 }
             let db = handle
-            return (try? await withBlockingIO(on: ioQueue) { sqlite3_last_insert_rowid(db.db) }) ?? 0
+            return (try? await withBlockingIO(on: ioQueue) {
+                guard !db.closed else { throw PerunError.connectionClosed }
+                return sqlite3_last_insert_rowid(db.db)
+            }) ?? 0
         }
     }
 
-    /// Rows changed by the most recent statement (`sqlite3_changes`).
+    /// Rows changed by the most recent statement (`sqlite3_changes`). `0` if closed.
     public var changes: Int {
         get async {
             if isClosed { return 0 }
             let db = handle
-            return (try? await withBlockingIO(on: ioQueue) { Int(sqlite3_changes(db.db)) }) ?? 0
+            return (try? await withBlockingIO(on: ioQueue) {
+                guard !db.closed else { throw PerunError.connectionClosed }
+                return Int(sqlite3_changes(db.db))
+            }) ?? 0
         }
     }
 
-    /// Rows changed by all statements since the connection opened (`sqlite3_total_changes`).
+    /// Rows changed by all statements since the connection opened (`sqlite3_total_changes`). `0` if
+    /// closed.
     public var totalChanges: Int {
         get async {
             if isClosed { return 0 }
             let db = handle
-            return (try? await withBlockingIO(on: ioQueue) { Int(sqlite3_total_changes(db.db)) }) ?? 0
+            return (try? await withBlockingIO(on: ioQueue) {
+                guard !db.closed else { throw PerunError.connectionClosed }
+                return Int(sqlite3_total_changes(db.db))
+            }) ?? 0
         }
     }
 
@@ -337,10 +362,8 @@ public actor SQLiteConnection {
 
         let prepared: (handle: StatementHandle, columns: [ColumnMetadata]) =
             try await withBlockingIO(on: ioQueue) {
-                var stmt: OpaquePointer?
-                guard sqlite3_prepare_v2(db.db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
-                    throw perunSQLiteError(db.db)
-                }
+                guard !db.closed else { throw PerunError.connectionClosed }
+                let stmt = try perunCompileSingle(sql, db: db.db)
                 do {
                     try perunBindParameters(boundParameters, to: stmt, db: db.db)
                 } catch {
@@ -460,11 +483,34 @@ public actor SQLiteConnection {
                 sqlite3_finalize(handle.stmt)
                 handle.stmt = nil
             }
+            db.closed = true       // block any later ioQueue op before we free the handle
             sqlite3_close_v2(db.db)
             return ()
         }
         changeContinuation.finish()
         changeHookBox = nil        // hook removed above; safe to release the box
+    }
+
+    /// Safety net for a connection dropped without `close()`: free the handle, its statements, and
+    /// the change-hook on the `ioQueue` so a forgotten connection (or a pool dropped without
+    /// `shutdown()`) doesn't leak the `sqlite3 *`, its file descriptor, or compiled statements.
+    /// Mirrors perun-pgsql's `PostgresConnection` deinit. At deinit there are no other references,
+    /// so no in-flight operation can race this.
+    deinit {
+        guard !isClosed else { return }
+        let statementHandles = Array(statements.values) + streams.values.map(\.handle)
+        let db = handle
+        let hadChangeHook = changeHookBox != nil
+        changeContinuation.finish()
+        ioQueue.async {
+            if hadChangeHook { sqlite3_update_hook(db.db, nil, nil) }
+            for handle in statementHandles where handle.stmt != nil {
+                sqlite3_finalize(handle.stmt)
+                handle.stmt = nil
+            }
+            db.closed = true
+            sqlite3_close_v2(db.db)
+        }
     }
 
     // MARK: - Streaming internals
@@ -564,30 +610,37 @@ public actor SQLiteConnection {
 
     private func _runMultiStatement(_ sql: String) async throws -> QueryResult {
         let db = handle
-        return try await runCancellable { try perunRunMultiStatement(sql, db: db.db) }
+        return try await runCancellable {
+            guard !db.closed else { throw PerunError.connectionClosed }
+            return try perunRunMultiStatement(sql, db: db.db)
+        }
     }
 
     private func _runSingleStatement(_ sql: String,
                                      _ parameters: [(any SQLiteEncodable)?]) async throws -> QueryResult {
         let db = handle
-        return try await runCancellable { try perunRunSingleStatement(sql, parameters, db: db.db) }
+        return try await runCancellable {
+            guard !db.closed else { throw PerunError.connectionClosed }
+            return try perunRunSingleStatement(sql, parameters, db: db.db)
+        }
     }
 
     /// Run a control statement (BEGIN/COMMIT/ROLLBACK) uninterruptibly, so a cancel can't leave a
     /// transaction half-open.
     private func _execUninterruptible(_ sql: String) async throws {
         let db = handle
-        _ = try await withBlockingIO(on: ioQueue) { try perunRunSingleStatement(sql, [], db: db.db) }
+        _ = try await withBlockingIO(on: ioQueue) {
+            guard !db.closed else { throw PerunError.connectionClosed }
+            return try perunRunSingleStatement(sql, [], db: db.db)
+        }
     }
 
     private func _prepare(_ sql: String) async throws -> PreparedStatement {
         let db = handle
         let prepared: (handle: StatementHandle, columns: [ColumnMetadata], parameterCount: Int) =
             try await withBlockingIO(on: ioQueue) {
-                var stmt: OpaquePointer?
-                guard sqlite3_prepare_v2(db.db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
-                    throw perunSQLiteError(db.db)
-                }
+                guard !db.closed else { throw PerunError.connectionClosed }
+                let stmt = try perunCompileSingle(sql, db: db.db)
                 return (StatementHandle(stmt),
                         perunColumnMetadata(stmt),
                         Int(sqlite3_bind_parameter_count(stmt)))
@@ -765,7 +818,12 @@ private func perunBindText(_ stmt: OpaquePointer, _ index: Int32, _ string: Stri
 
 private func perunBindBlob(_ stmt: OpaquePointer, _ index: Int32, _ bytes: [UInt8]) -> Int32 {
     bytes.withUnsafeBytes { raw in
-        sqlite3_bind_blob(stmt, index, raw.baseAddress, Int32(raw.count), SQLITE_TRANSIENT)
+        guard let base = raw.baseAddress else {
+            // An empty array can yield a nil base pointer, and bind_blob(NULL, 0) binds SQL NULL,
+            // not an empty BLOB. Bind a valid zero-length pointer instead (mirrors the text path).
+            return sqlite3_bind_blob(stmt, index, "", 0, SQLITE_TRANSIENT)
+        }
+        return sqlite3_bind_blob(stmt, index, base, Int32(raw.count), SQLITE_TRANSIENT)
     }
 }
 
@@ -807,14 +865,39 @@ func perunRunMultiStatement(_ sql: String, db: OpaquePointer) throws -> QueryRes
                        lastInsertRowID: sqlite3_last_insert_rowid(db))
 }
 
+/// Compile exactly one statement, rejecting a trailing second statement (`SELECT 1; SELECT 2`).
+/// Returns the still-open compiled statement — the caller owns finalization. The statement is
+/// independent of `sql`'s storage once compiled, so it safely outlives the `withCString` buffer.
+func perunCompileSingle(_ sql: String, db: OpaquePointer) throws -> OpaquePointer {
+    try sql.withCString { cString in
+        var stmt: OpaquePointer?
+        var tail: UnsafePointer<CChar>?
+        guard sqlite3_prepare_v2(db, cString, -1, &stmt, &tail) == SQLITE_OK, let stmt else {
+            throw perunSQLiteError(db)
+        }
+        if let tail, perunHasStatement(db, tail) {
+            sqlite3_finalize(stmt)
+            throw PerunError.multipleStatements
+        }
+        return stmt
+    }
+}
+
+/// Whether `tail` (what follows the first compiled statement) holds a real further statement, as
+/// opposed to only whitespace/comments — determined by letting SQLite try to compile it.
+private func perunHasStatement(_ db: OpaquePointer, _ tail: UnsafePointer<CChar>) -> Bool {
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, tail, -1, &stmt, nil) == SQLITE_OK else { return false }
+    let hasStatement = stmt != nil
+    if let stmt { sqlite3_finalize(stmt) }
+    return hasStatement
+}
+
 /// Compile and run a single parameterized statement.
 func perunRunSingleStatement(_ sql: String,
                              _ parameters: [(any SQLiteEncodable)?],
                              db: OpaquePointer) throws -> QueryResult {
-    var stmt: OpaquePointer?
-    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
-        throw perunSQLiteError(db)
-    }
+    let stmt = try perunCompileSingle(sql, db: db)
     defer { sqlite3_finalize(stmt) }
 
     try perunBindParameters(parameters, to: stmt, db: db)
