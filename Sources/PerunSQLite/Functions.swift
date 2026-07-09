@@ -1,0 +1,153 @@
+import CSQLite
+
+/// Retains a custom-function closure so the C callbacks can reach it through `sqlite3_user_data`.
+/// `@unchecked Sendable` because the closure is `@Sendable` and SQLite invokes it serially on the
+/// connection's queue.
+final class FunctionBox: @unchecked Sendable {
+    let implementation: @Sendable ([SQLiteValue]) throws -> SQLiteValue
+    init(_ implementation: @escaping @Sendable ([SQLiteValue]) throws -> SQLiteValue) {
+        self.implementation = implementation
+    }
+}
+
+extension SQLiteConnection {
+    /// Register a scalar SQL function implemented in Swift.
+    ///
+    /// The function becomes callable from SQL on this connection. It has no analogue in the
+    /// PostgreSQL driver (there, functions live in the server), but it is a staple of embedded
+    /// SQLite use — e.g. exposing a Swift comparison, hash, or formatting routine to `WHERE` /
+    /// `ORDER BY`.
+    ///
+    /// ```swift
+    /// try await connection.createFunction("reverse", argumentCount: 1) { args in
+    ///     guard case let .text(s) = args[0] else { return .null }
+    ///     return .text(String(s.reversed()))
+    /// }
+    /// let flipped = try await connection.query("SELECT reverse('abc') AS r")
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - name: the SQL function name.
+    ///   - argumentCount: the exact number of arguments, or `-1` for variadic.
+    ///   - deterministic: whether the function returns the same result for the same inputs (lets
+    ///     SQLite use it in more contexts, e.g. indexes on expressions).
+    ///   - implementation: maps the argument values to a result. Throwing surfaces to SQL as a
+    ///     function error.
+    public func createFunction(
+        _ name: String,
+        argumentCount: Int32 = -1,
+        deterministic: Bool = false,
+        _ implementation: @escaping @Sendable ([SQLiteValue]) throws -> SQLiteValue
+    ) async throws {
+        try ensureOpen()
+        let box = FunctionBox(implementation)
+        let db = handle
+        let functionName = name
+        let argCount = argumentCount
+        let isDeterministic = deterministic
+
+        let rc: Int32 = try await withBlockingIO(on: ioQueue) {
+            // Hand ownership of the box to SQLite; the xDestroy callback releases it (on close, on
+            // replacement, or if registration fails).
+            let context = Unmanaged.passRetained(box).toOpaque()
+            var flags = SQLITE_UTF8
+            if isDeterministic { flags |= SQLITE_DETERMINISTIC }
+            return sqlite3_create_function_v2(
+                db.db, functionName, argCount, flags, context,
+                { context, argumentCount, arguments in
+                    perunInvokeFunction(context, argumentCount, arguments)
+                },
+                nil,        // xStep (aggregate) — scalar only
+                nil,        // xFinal (aggregate) — scalar only
+                { context in perunReleaseFunctionBox(context) }
+            )
+        }
+        guard rc == SQLITE_OK else {
+            // create_function_v2 already invoked xDestroy (releasing the box) on failure.
+            throw perunSQLiteError(db.db)
+        }
+    }
+}
+
+// MARK: - C trampolines
+
+/// The xFunc callback: read the argument values, run the Swift closure, set the result.
+private func perunInvokeFunction(_ context: OpaquePointer?,
+                                 _ argumentCount: Int32,
+                                 _ arguments: UnsafeMutablePointer<OpaquePointer?>?) {
+    guard let context, let boxPointer = sqlite3_user_data(context) else { return }
+    let box = Unmanaged<FunctionBox>.fromOpaque(boxPointer).takeUnretainedValue()
+
+    var values: [SQLiteValue] = []
+    values.reserveCapacity(Int(argumentCount))
+    if let arguments {
+        for index in 0 ..< Int(argumentCount) {
+            values.append(perunValue(from: arguments[index]))
+        }
+    }
+
+    do {
+        perunSetResult(context, try box.implementation(values))
+    } catch {
+        let message = String(describing: error)
+        message.withCString { sqlite3_result_error(context, $0, -1) }
+    }
+}
+
+/// The xDestroy callback: release the retained function box.
+private func perunReleaseFunctionBox(_ pointer: UnsafeMutableRawPointer?) {
+    guard let pointer else { return }
+    Unmanaged<FunctionBox>.fromOpaque(pointer).release()
+}
+
+/// Read a `sqlite3_value *` argument into a `SQLiteValue`.
+private func perunValue(from value: OpaquePointer?) -> SQLiteValue {
+    guard let value else { return .null }
+    switch sqlite3_value_type(value) {
+    case SQLITE_INTEGER:
+        return .integer(sqlite3_value_int64(value))
+    case SQLITE_FLOAT:
+        return .real(sqlite3_value_double(value))
+    case SQLITE_TEXT:
+        let count = Int(sqlite3_value_bytes(value))
+        if count > 0, let pointer = sqlite3_value_text(value) {
+            return .text(String(decoding: UnsafeBufferPointer(start: pointer, count: count), as: UTF8.self))
+        }
+        return .text("")
+    case SQLITE_BLOB:
+        let count = Int(sqlite3_value_bytes(value))
+        if count > 0, let pointer = sqlite3_value_blob(value) {
+            return .blob(Array(UnsafeRawBufferPointer(start: pointer, count: count)))
+        }
+        return .blob([])
+    default:
+        return .null
+    }
+}
+
+/// Set a `SQLiteValue` as a function's result.
+private func perunSetResult(_ context: OpaquePointer, _ value: SQLiteValue) {
+    switch value {
+    case .null:
+        sqlite3_result_null(context)
+    case let .integer(value):
+        sqlite3_result_int64(context, value)
+    case let .real(value):
+        sqlite3_result_double(context, value)
+    case let .text(string):
+        var string = string
+        string.withUTF8 { buffer in
+            if let base = buffer.baseAddress {
+                sqlite3_result_text(context,
+                                    UnsafeRawPointer(base).assumingMemoryBound(to: CChar.self),
+                                    Int32(buffer.count), SQLITE_TRANSIENT)
+            } else {
+                sqlite3_result_text(context, "", 0, SQLITE_TRANSIENT)
+            }
+        }
+    case let .blob(bytes):
+        bytes.withUnsafeBytes { raw in
+            sqlite3_result_blob(context, raw.baseAddress, Int32(raw.count), SQLITE_TRANSIENT)
+        }
+    }
+}

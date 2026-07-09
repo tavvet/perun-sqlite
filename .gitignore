@@ -1,0 +1,9 @@
+.build
+
+# Resolved only for a docs build (PERUN_BUILD_DOCS=1); the normal graph has no dependencies.
+Package.resolved
+
+# SQLite sidecar files that a stray test/run might leave behind.
+*.db-wal
+*.db-shm
+*.db-journal
