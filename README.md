@@ -86,6 +86,26 @@ primitives, sockets, request pipelining, arrays, and the interval/time/inet type
   Debian/Ubuntu: `apt install libsqlite3-dev pkg-config`. (If you have Homebrew's `sqlite` on the
   pkg-config path, SwiftPM will link that; the driver works with either.)
 
+## Documentation
+
+The full guides are DocC articles. Build them (into a `.doccarchive` you can open in Xcode) with:
+
+```bash
+./Scripts/build-docs.sh
+```
+
+- **Getting started** — install, open a database, run your first query.
+- **Connecting** — configuration, journal modes, and pragmas.
+- **Running queries**, **Transactions**, **Connection pool**, **Streaming** — the data-access core.
+- **Online backup**, **Data-change hooks**, **Custom SQL functions** — the SQLite-native extras.
+- **Decoding and encoding** — the type system and custom codecs.
+- **Errors and recovery** — the error model, the reusability contract, cancellation, timeouts.
+- **Architecture** — how the driver is put together.
+
+Every push to `main` publishes the site to GitHub Pages via
+[`.github/workflows/docs.yml`](.github/workflows/docs.yml) (one-time setup: repository Settings →
+Pages → Source = "GitHub Actions").
+
 ## Testing
 
 ```bash
