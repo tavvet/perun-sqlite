@@ -232,6 +232,9 @@ public enum PerunError: Error, CustomStringConvertible, Sendable, Equatable {
     /// A single-statement API (`query(_:_:)`, `prepare`, `queryStream`) was given SQL containing
     /// more than one statement. Use `query(_:)` (no parameters) to run several statements.
     case multipleStatements
+    /// `createFunction` was given an argument count outside SQLite's allowed range: it must be
+    /// `nil` (variadic) or `0…127` (values above 127 are undefined behavior in the C API).
+    case invalidArgumentCount(Int)
     /// A prepared-statement handle was used on a different connection than the one that created
     /// it. Statements are scoped to their connection.
     case preparedStatementConnectionMismatch
@@ -262,6 +265,8 @@ public enum PerunError: Error, CustomStringConvertible, Sendable, Equatable {
             return "parameter count mismatch: statement expects \(expected), got \(got)"
         case .multipleStatements:
             return "SQL contains more than one statement; use query(_:) to run several"
+        case let .invalidArgumentCount(count):
+            return "invalid function argument count \(count): must be nil (variadic) or 0…127"
         case .preparedStatementConnectionMismatch:
             return "prepared statement belongs to a different connection"
         case .invalidTransactionContext:
@@ -306,8 +311,8 @@ extension PerunError {
                 return false
             }
         case .unexpectedNull, .columnNotFound, .decodingFailed, .parameterCountMismatch,
-             .multipleStatements, .preparedStatementConnectionMismatch, .invalidTransactionContext,
-             .clientShutdown, .timedOut:
+             .multipleStatements, .invalidArgumentCount, .preparedStatementConnectionMismatch,
+             .invalidTransactionContext, .clientShutdown, .timedOut:
             return false
         }
     }

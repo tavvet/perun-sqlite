@@ -167,4 +167,62 @@ final class RegressionTests: XCTestCase {
         XCTAssertEqual(a.columns, b.columns)
         XCTAssertEqual(a.first?["v"], b.first?["v"])
     }
+
+    // createFunction validates the argument count (SQLite requires nil or 0…127; larger values are
+    // UB in C and could even trap Int32.init).
+    func testCreateFunctionArgumentCountValidation() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+
+        for badCount in [128, 200, Int(Int32.max) + 1] {
+            do {
+                try await conn.createFunction("bad", argumentCount: badCount) { _ in .null }
+                XCTFail("expected invalidArgumentCount for \(badCount)")
+            } catch let error as PerunError {
+                XCTAssertEqual(error, .invalidArgumentCount(badCount))
+            }
+        }
+
+        // Boundary and variadic values are accepted.
+        try await conn.createFunction("zero", argumentCount: 0) { _ in .integer(1) }
+        try await conn.createFunction("max127", argumentCount: 127) { _ in .integer(1) }
+        try await conn.createFunction("variadic", argumentCount: nil) { _ in .integer(1) }
+        let value = try await conn.query("SELECT zero() AS v").first!.decode("v", as: Int.self)
+        XCTAssertEqual(value, 1)
+    }
+
+    // A custom function returning an empty blob must yield an empty BLOB, not SQL NULL.
+    func testCustomFunctionEmptyBlobResult() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.createFunction("emptyblob", argumentCount: 0) { _ in .blob([]) }
+
+        let row = try await conn.query("SELECT emptyblob() AS b, typeof(emptyblob()) AS ty").first!
+        XCTAssertFalse(row["b"]!.isNull)
+        XCTAssertEqual(row["b"]!.value.storageClass, .blob)
+        XCTAssertEqual(try row.decode("ty", as: String.self), "blob")
+        XCTAssertEqual(try row.decode("b", as: [UInt8].self), [])
+    }
+
+    // Malformed SQL after the first statement surfaces its error instead of being silently dropped.
+    func testMalformedTrailingStatementSurfacesError() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.query("CREATE TABLE t (v INTEGER)")
+
+        do {
+            try await conn.query("SELECT 1; this is not valid sql", [])
+            XCTFail("expected the malformed trailing statement to surface an error")
+        } catch let error as PerunError {
+            XCTAssertNotNil(error.sqliteError)      // a real SQLite parse error, not multipleStatements
+        }
+
+        // A well-formed second statement still reports multipleStatements.
+        do {
+            try await conn.query("SELECT 1; SELECT 2", [])
+            XCTFail("expected multipleStatements")
+        } catch let error as PerunError {
+            XCTAssertEqual(error, .multipleStatements)
+        }
+    }
 }

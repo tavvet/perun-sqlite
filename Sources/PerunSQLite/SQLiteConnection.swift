@@ -893,22 +893,25 @@ func perunCompileSingle(_ sql: String, db: OpaquePointer) throws -> OpaquePointe
         guard sqlite3_prepare_v2(db, cString, -1, &stmt, &tail) == SQLITE_OK, let stmt else {
             throw perunSQLiteError(db)
         }
-        if let tail, perunHasStatement(db, tail) {
-            sqlite3_finalize(stmt)
-            throw PerunError.multipleStatements
+        // Everything after the first statement except whitespace/comments is rejected. Let SQLite
+        // parse the tail: a real second statement → multipleStatements; SQL that fails to compile
+        // (e.g. `SELECT 1; garbage`) surfaces its own error rather than being silently dropped.
+        if let tail {
+            var tailStatement: OpaquePointer?
+            let rc = sqlite3_prepare_v2(db, tail, -1, &tailStatement, nil)
+            guard rc == SQLITE_OK else {
+                let error = perunSQLiteError(db)      // capture before finalize resets db error state
+                sqlite3_finalize(stmt)
+                throw error
+            }
+            if let tailStatement {
+                sqlite3_finalize(tailStatement)
+                sqlite3_finalize(stmt)
+                throw PerunError.multipleStatements
+            }
         }
         return stmt
     }
-}
-
-/// Whether `tail` (what follows the first compiled statement) holds a real further statement, as
-/// opposed to only whitespace/comments — determined by letting SQLite try to compile it.
-private func perunHasStatement(_ db: OpaquePointer, _ tail: UnsafePointer<CChar>) -> Bool {
-    var stmt: OpaquePointer?
-    guard sqlite3_prepare_v2(db, tail, -1, &stmt, nil) == SQLITE_OK else { return false }
-    let hasStatement = stmt != nil
-    if let stmt { sqlite3_finalize(stmt) }
-    return hasStatement
 }
 
 /// Compile and run a single parameterized statement.

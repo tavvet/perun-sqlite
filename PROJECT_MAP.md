@@ -317,11 +317,14 @@ perun-pgsql). Текстовый парсер `parseSQLiteDate` терпим к 
   — безопасно только в serialized-режиме SQLite). Best-effort гвард `!source.closed && !dest.closed`
   на очереди сужает окно закрытия.
 - **Functions** (`Functions.swift`): `createFunction(_:argumentCount:deterministic:_:)`
-  (`argumentCount: Int?`, `nil` = variadic) через `sqlite3_create_function_v2`. xFunc/xDestroy —
-  `@convention(c)`-замыкания без захвата, зовущие
-  глобальные хелперы; замыкание пользователя — в `FunctionBox` (`passRetained`, освобождается
-  xDestroy при close/replace/ошибке регистрации). Аргументы читаются из `sqlite3_value_*`, результат
-  ставится `sqlite3_result_*`; throw → `sqlite3_result_error`.
+  (`argumentCount: Int?`, `nil` = variadic) через `sqlite3_create_function_v2`. `argumentCount`
+  валидируется (`nil` или `0…127`, иначе `invalidArgumentCount` — вне диапазона это UB в C и трап
+  `Int32.init`). Ошибка регистрации формируется **внутри** блока `ioQueue` (не после хопа на актор,
+  где конкурентный `close()` мог бы освободить handle). xFunc/xDestroy — `@convention(c)`-замыкания
+  без захвата, зовущие глобальные хелперы; замыкание пользователя — в `FunctionBox` (`passRetained`,
+  освобождается xDestroy при close/replace/ошибке регистрации). Аргументы читаются из
+  `sqlite3_value_*`, результат — `sqlite3_result_*` (пустой blob — через непустой sentinel, как в
+  бинде); throw → `sqlite3_result_error`.
 
 ## Tests
 

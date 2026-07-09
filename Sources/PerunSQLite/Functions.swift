@@ -40,20 +40,25 @@ extension SQLiteConnection {
         _ implementation: @escaping @Sendable ([SQLiteValue]) throws -> SQLiteValue
     ) async throws {
         try ensureOpen()
+        // SQLite's C API requires nArg ∈ [-1, 127]; anything else is undefined behavior (and a
+        // value above Int32.max would even trap Int32.init). Validate before touching C.
+        if let argumentCount, !(0 ... 127).contains(argumentCount) {
+            throw PerunError.invalidArgumentCount(argumentCount)
+        }
         let box = FunctionBox(implementation)
         let db = handle
         let functionName = name
-        let argCount = argumentCount.map(Int32.init) ?? -1      // SQLite's -1 = variadic
+        let argCount = argumentCount.map { Int32($0) } ?? -1      // now guaranteed 0…127 or -1 (variadic)
         let isDeterministic = deterministic
 
-        let rc: Int32 = try await withBlockingIO(on: ioQueue) {
+        try await withBlockingIO(on: ioQueue) {
             guard !db.closed else { throw PerunError.connectionClosed }
             // Hand ownership of the box to SQLite; the xDestroy callback releases it (on close, on
             // replacement, or if registration fails).
             let context = Unmanaged.passRetained(box).toOpaque()
             var flags = SQLITE_UTF8
             if isDeterministic { flags |= SQLITE_DETERMINISTIC }
-            return sqlite3_create_function_v2(
+            let rc = sqlite3_create_function_v2(
                 db.db, functionName, argCount, flags, context,
                 { context, argumentCount, arguments in
                     perunInvokeFunction(context, argumentCount, arguments)
@@ -62,10 +67,11 @@ extension SQLiteConnection {
                 nil,        // xFinal (aggregate) — scalar only
                 { context in perunReleaseFunctionBox(context) }
             )
-        }
-        guard rc == SQLITE_OK else {
-            // create_function_v2 already invoked xDestroy (releasing the box) on failure.
-            throw perunSQLiteError(db.db)
+            // Read the error on the queue while the handle is guaranteed live — not after the hop
+            // back to the actor, where a concurrent close() may have freed it. create_function_v2
+            // already invoked xDestroy (releasing the box) on failure.
+            guard rc == SQLITE_OK else { throw perunSQLiteError(db.db) }
+            return ()
         }
     }
 }
@@ -148,7 +154,13 @@ private func perunSetResult(_ context: OpaquePointer, _ value: SQLiteValue) {
         }
     case let .blob(bytes):
         bytes.withUnsafeBytes { raw in
-            sqlite3_result_blob(context, raw.baseAddress, Int32(raw.count), SQLITE_TRANSIENT)
+            guard let base = raw.baseAddress else {
+                // An empty array can yield a nil base pointer, and result_blob(NULL, 0) sets SQL
+                // NULL, not an empty BLOB. Use a valid zero-length pointer (mirrors perunBindBlob).
+                sqlite3_result_blob(context, "", 0, SQLITE_TRANSIENT)
+                return
+            }
+            sqlite3_result_blob(context, base, Int32(raw.count), SQLITE_TRANSIENT)
         }
     }
 }
