@@ -109,6 +109,51 @@ final class TypeTests: XCTestCase {
         XCTAssertEqual(try row.decode("dec", as: Decimal.self), decimal)
     }
 
+    // Float must reject values it can't hold rather than round to ±infinity or silently lose bits.
+    func testFloatRejectsOutOfRange() throws {
+        XCTAssertEqual(try Float.decode(from: .real(1.5)), 1.5)
+        XCTAssertThrowsError(try Float.decode(from: .real(1e300)))          // would overflow to +inf
+        XCTAssertThrowsError(try Float.decode(from: .integer(16_777_217)))  // not exactly representable
+    }
+
+    // Decimal from a REAL must not carry binary-float artifacts, and a TEXT decimal must be whole.
+    func testDecimalPrecisionAndStrictText() throws {
+        XCTAssertEqual(try Decimal.decode(from: .real(0.1)), Decimal(string: "0.1"))
+        XCTAssertThrowsError(try Decimal.decode(from: .text("1.5abc")))     // trailing garbage
+    }
+
+    // The date parser rejects impossible calendar dates/times and accepts lowercase t/z separators.
+    func testDateParserValidation() throws {
+        XCTAssertNoThrow(try Date.decode(from: .text("2024-02-29")))        // 2024 is a leap year
+        XCTAssertNoThrow(try Date.decode(from: .text("2024-01-01t12:00:00z")))
+        XCTAssertThrowsError(try Date.decode(from: .text("2023-02-29")))    // 2023 is not
+        XCTAssertThrowsError(try Date.decode(from: .text("2024-02-30")))
+        XCTAssertThrowsError(try Date.decode(from: .text("2024-13-01")))
+        XCTAssertThrowsError(try Date.decode(from: .text("2024-01-01 25:00:00")))
+    }
+
+    // A JSON BLOB that isn't valid UTF-8 (i.e. binary JSONB) must error, not decode to mojibake.
+    func testJSONRejectsBinaryJSONB() throws {
+        XCTAssertEqual(try SQLiteJSON.decode(from: .blob(Array("{\"a\":1}".utf8))).text, "{\"a\":1}")
+        XCTAssertThrowsError(try SQLiteJSON.decode(from: .blob([0x8C, 0x17, 0x61, 0x13])))
+    }
+
+    // A decode failure in a row names the offending column, not just the type.
+    func testDecodeErrorNamesColumn() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.query("CREATE TABLE t (a INTEGER, label TEXT)")
+        try await conn.query("INSERT INTO t (a, label) VALUES (1, 'abc')")
+        let row = try await conn.query("SELECT a, label FROM t").rows[0]
+        do {
+            _ = try row.decode("label", as: Int.self)          // "abc" is not an Int
+            XCTFail("expected decode to throw")
+        } catch let error as PerunError {
+            XCTAssertTrue(error.description.contains("label"),
+                          "decode error should name the column: \(error.description)")
+        }
+    }
+
     func testColumnMetadataDeclaredType() async throws {
         let conn = try await SQLiteConnection.connect(.memory())
         defer { Task { try? await conn.close() } }

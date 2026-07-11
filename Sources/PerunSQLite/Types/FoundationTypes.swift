@@ -61,14 +61,22 @@ extension Decimal: SQLiteDecodable {
     public static func decode(from value: SQLiteValue) throws -> Decimal {
         switch value {
         case let .text(s):
-            guard let dec = Decimal(string: s) else {
+            // Decimal(string:) is a prefix parser — "1.5abc" would decode to 1.5. Use a Scanner and
+            // require the whole string to be consumed, so trailing garbage is a decode error.
+            let scanner = Scanner(string: s.trimmingCharacters(in: .whitespaces))
+            guard let dec = scanner.scanDecimal(), scanner.isAtEnd else {
                 throw sqliteDecodeError("Decimal", value, "\"\(s)\" is not a decimal")
             }
             return dec
         case let .integer(i):
             return Decimal(i)
         case let .real(d):
-            return Decimal(d)
+            // Decimal(_: Double) carries the binary-float artifacts (0.1 → 0.1000000000000000055…).
+            // Going through the shortest round-tripping decimal string yields the intended value.
+            guard d.isFinite, let dec = Decimal(string: String(d)) else {
+                throw sqliteDecodeError("Decimal", value, "\(d) is not a finite decimal")
+            }
+            return dec
         case .blob, .null:
             throw sqliteDecodeError("Decimal", value)
         }
@@ -148,23 +156,24 @@ func parseSQLiteDate(_ string: String) -> Date? {
     func isDigit(_ ascii: UInt8) -> Bool { ascii >= 0x30 && ascii <= 0x39 }
 
     guard let year = readInt(maxDigits: 9), expect(0x2d),           // '-'
-          let month = readInt(maxDigits: 2), expect(0x2d),
-          let day = readInt(maxDigits: 2) else { return nil }
+          let month = readInt(maxDigits: 2), (1...12).contains(month), expect(0x2d),
+          let day = readInt(maxDigits: 2), (1...daysInMonth(year: year, month: month)).contains(day)
+    else { return nil }
 
     var hour = 0, minute = 0, second = 0
     var fractional = 0.0
     var offsetSeconds = 0
 
-    // Optional time part, after a space or 'T'.
+    // Optional time part, after a space or 'T'/'t'.
     if index < scalars.count,
-       scalars[index] == 0x54
+       scalars[index] == 0x54 || scalars[index] == 0x74
         || (scalars[index] == 0x20 && index + 1 < scalars.count && isDigit(scalars[index + 1])) {
         index += 1
-        guard let h = readInt(maxDigits: 2), expect(0x3a),          // ':'
-              let m = readInt(maxDigits: 2) else { return nil }
+        guard let h = readInt(maxDigits: 2), (0...23).contains(h), expect(0x3a),   // ':'
+              let m = readInt(maxDigits: 2), (0...59).contains(m) else { return nil }
         hour = h; minute = m
         if expect(0x3a) {                                           // ':SS' is optional (SQLite allows HH:MM)
-            guard let s = readInt(maxDigits: 2) else { return nil }
+            guard let s = readInt(maxDigits: 2), (0...59).contains(s) else { return nil }
             second = s
         }
 
@@ -187,7 +196,7 @@ func parseSQLiteDate(_ string: String) -> Date? {
             let os = readInt(maxDigits: 2) ?? 0
             let magnitude = oh * 3600 + om * 60 + os
             offsetSeconds = negative ? -magnitude : magnitude
-        } else if index < scalars.count, scalars[index] == 0x5a {  // 'Z'
+        } else if index < scalars.count, scalars[index] == 0x5a || scalars[index] == 0x7a {  // 'Z'/'z'
             index += 1
         }
     }
@@ -198,6 +207,22 @@ func parseSQLiteDate(_ string: String) -> Date? {
     let epochSeconds = Double(days * 86_400 + hour * 3600 + minute * 60 + second)
         + fractional - Double(offsetSeconds)
     return Date(timeIntervalSince1970: epochSeconds)
+}
+
+/// Whether `year` is a leap year in the proleptic Gregorian calendar.
+private func isLeapYear(_ year: Int) -> Bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// Days in `month` of `year` (1–12), so the parser rejects impossible dates like `2024-02-30`
+/// instead of letting the day-count arithmetic silently roll them over.
+private func daysInMonth(year: Int, month: Int) -> Int {
+    switch month {
+    case 1, 3, 5, 7, 8, 10, 12: return 31
+    case 4, 6, 9, 11: return 30
+    case 2: return isLeapYear(year) ? 29 : 28
+    default: return 0
+    }
 }
 
 /// Days from the Unix epoch (1970-01-01) to the given proleptic Gregorian date.

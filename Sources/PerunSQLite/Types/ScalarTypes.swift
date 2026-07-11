@@ -67,9 +67,19 @@ extension Float: SQLiteDecodable {
     public static func decode(from value: SQLiteValue) throws -> Float {
         switch value {
         case let .real(d):
-            return Float(d)
+            // Allow rounding to the nearest Float, but not silent overflow: a finite REAL that
+            // doesn't fit Float must error rather than become ±infinity (the integer path already
+            // rejects out-of-range via T(exactly:)).
+            let f = Float(d)
+            guard f.isFinite || !d.isFinite else {
+                throw sqliteDecodeError("Float", value, "\(d) is out of range for Float")
+            }
+            return f
         case let .integer(i):
-            return Float(i)
+            guard let f = Float(exactly: i) else {
+                throw sqliteDecodeError("Float", value, "\(i) is not exactly representable as Float")
+            }
+            return f
         case let .text(s):
             guard let f = Float(s) else {
                 throw sqliteDecodeError("Float", value, "\"\(s)\" is not a number")

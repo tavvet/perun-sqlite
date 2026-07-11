@@ -17,7 +17,14 @@ public extension SQLiteCell {
         if value.isNull {
             throw PerunError.unexpectedNull(column: column.name)
         }
-        return try T.decode(from: value)
+        do {
+            return try T.decode(from: value)
+        } catch let PerunError.decodingFailed(type, storageClass, reason) {
+            // The decoder is handed only a value, so it can't name the column — fold it in here so a
+            // failure in a wide row points at the offending column instead of just the type.
+            throw PerunError.decodingFailed(type: type, storageClass: storageClass,
+                                            reason: "\(reason) [column \"\(column.name)\"]")
+        }
     }
 
     /// Decode this cell into `T`, or `nil` if it is SQL NULL.
