@@ -17,6 +17,12 @@
 ///
 /// The operation must be cancellation-aware for the timeout to take effect promptly; the driver's
 /// query paths are. A non-cancellable operation still runs to completion.
+///
+/// - Note: like any cancellation, this races the operation's completion. An autocommit write that
+///   finishes in the instant the timeout fires may have committed even though `withTimeout` throws
+///   `timedOut` — the interrupt lands after the statement is already done. Wrap writes whose
+///   landing you must know in a transaction, or re-check the row, rather than assuming a timeout
+///   means the write did not happen.
 public func withTimeout<T: Sendable>(
     _ duration: Duration,
     _ operation: @Sendable @escaping () async throws -> T

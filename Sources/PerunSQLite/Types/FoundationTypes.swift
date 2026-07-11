@@ -40,6 +40,13 @@ extension UUID: SQLiteDecodable {
 extension Date: SQLiteDecodable {
     /// Decode a `Date` from any of SQLite's three common date conventions: TEXT (ISO-8601),
     /// INTEGER (Unix epoch seconds), or REAL (Julian day, as `julianday()` produces).
+    ///
+    /// - Important: a REAL is read as a **Julian day**, not Unix seconds. If your schema stores
+    ///   `timeIntervalSince1970` (or `unixepoch('subsec')`) as a REAL, decode it yourself
+    ///   (`Date(timeIntervalSince1970:)` via `decode(_:as: Double.self)`) — reading it as a Julian
+    ///   day would misinterpret it by millions of years. The two conventions can't be told apart
+    ///   from the stored value, so the driver commits to the one `julianday()` uses. The encoder
+    ///   never writes REAL (it writes ISO-8601 TEXT), so this branch only ever sees foreign data.
     public static func decode(from value: SQLiteValue) throws -> Date {
         switch value {
         case let .text(s):
