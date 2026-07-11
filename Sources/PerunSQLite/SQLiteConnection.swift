@@ -383,6 +383,14 @@ public actor SQLiteConnection {
                 return (StatementHandle(stmt), perunColumnMetadata(stmt))
             }
 
+        // Actor reentrancy: close() may have run while we were suspended above. This statement was
+        // compiled after close() snapshotted its handle list, so it escaped that snapshot — finalize
+        // it here rather than register it (registering would leave close()'s sqlite3_close_v2 with an
+        // outstanding statement, i.e. a zombie handle whose file and locks never release).
+        guard !isClosed else {
+            await finalizeEscapedStatement(prepared.handle)
+            throw PerunError.connectionClosed
+        }
         streams[generation] = StreamState(handle: prepared.handle, columns: prepared.columns)
         return SQLiteRowStream(connection: self, generation: generation)
     }
@@ -585,7 +593,9 @@ public actor SQLiteConnection {
         let outcome: Result<[SQLiteValue]?, Error> = await withTaskCancellationHandler {
             do {
                 let row: [SQLiteValue]? = try await withBlockingIO(on: ioQueue) {
-                    guard let stmt = statementHandle.stmt else { return nil }
+                    // Guard the handle as well as the statement: a concurrent close() nils the stmt
+                    // on this same queue, but check db.closed too so we never step on a closed handle.
+                    guard !db.closed, let stmt = statementHandle.stmt else { return nil }
                     switch sqlite3_step(stmt) {
                     case SQLITE_ROW: return perunReadRow(stmt, columnCount)
                     case SQLITE_DONE: return nil
@@ -710,6 +720,12 @@ public actor SQLiteConnection {
                         perunColumnMetadata(stmt),
                         Int(sqlite3_bind_parameter_count(stmt)))
             }
+        // See queryStream: if close() ran while we were suspended, this statement escaped its
+        // snapshot; finalize it instead of registering it on a closing connection.
+        guard !isClosed else {
+            await finalizeEscapedStatement(prepared.handle)
+            throw PerunError.connectionClosed
+        }
         nextStatementID += 1
         let id = nextStatementID
         statements[id] = prepared.handle
@@ -718,6 +734,20 @@ public actor SQLiteConnection {
                                  parameterCount: prepared.parameterCount,
                                  columns: prepared.columns,
                                  connectionID: connectionID)
+    }
+
+    /// Finalize a statement `prepare`/`queryStream` compiled but is abandoning because `close()` ran
+    /// while it was suspended. Runs on the `ioQueue`; safe (and required) even after
+    /// `sqlite3_close_v2` — finalizing the last outstanding statement completes SQLite's deferred
+    /// close, releasing the file descriptor and locks the zombie handle was holding.
+    private func finalizeEscapedStatement(_ statementHandle: StatementHandle) async {
+        _ = try? await withBlockingIO(on: ioQueue) {
+            if let stmt = statementHandle.stmt {
+                sqlite3_finalize(stmt)
+                statementHandle.stmt = nil
+            }
+            return ()
+        }
     }
 
     private func _execute(_ statement: PreparedStatement,

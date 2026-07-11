@@ -146,6 +146,35 @@ final class ConnectionTests: XCTestCase {
         XCTAssertEqual(n, 50)
     }
 
+    // Closing a connection while a queryStream is being started concurrently must be safe: the
+    // stream either yields rows then ends, or throws connectionClosed — never a crash, hang, or a
+    // statement left outstanding on a closed handle (the actor-reentrancy window in queryStream).
+    func testConcurrentCloseDuringQueryStreamIsSafe() async throws {
+        for _ in 0..<50 {
+            let conn = try await openMemory()
+            try await conn.query("CREATE TABLE t (v INTEGER)")
+            try await conn.query("INSERT INTO t (v) VALUES (1), (2), (3)")
+
+            async let streaming: Void = {
+                do {
+                    for try await _ in try await conn.queryStream("SELECT v FROM t") {}
+                } catch {
+                    // connectionClosed (or an interrupt) is an acceptable outcome of the race.
+                }
+            }()
+            try? await conn.close()
+            await streaming
+
+            // The connection is closed and reports so, rather than being a leaked zombie handle.
+            do {
+                _ = try await conn.query("SELECT 1")
+                XCTFail("expected the connection to be closed")
+            } catch let error as PerunError {
+                XCTAssertEqual(error, .connectionClosed)
+            }
+        }
+    }
+
     func testTypedRoundTrips() async throws {
         let conn = try await openMemory()
         defer { Task { try? await conn.close() } }
