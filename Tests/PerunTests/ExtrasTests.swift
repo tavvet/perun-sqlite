@@ -28,6 +28,35 @@ final class ExtrasTests: XCTestCase {
         XCTAssertEqual(matches, 2)   // triple(v) > 9 ⇒ v > 3 ⇒ v ∈ {4, 5}
     }
 
+    func testDirectOnlyFunctionRejectedInSchema() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        // Default (directOnly: true): callable from top-level SQL, but not from a view.
+        try await conn.createFunction("double_it", argumentCount: 1) { args in
+            guard case let .integer(n) = args[0] else { return .null }
+            return .integer(n * 2)
+        }
+        let v = try await conn.query("SELECT double_it(21) AS v").rows[0].decode("v", as: Int.self)
+        XCTAssertEqual(v, 42)
+
+        try await conn.query("CREATE VIEW v_direct AS SELECT double_it(1) AS v")
+        do {
+            _ = try await conn.query("SELECT v FROM v_direct")
+            XCTFail("expected a directOnly function to be rejected inside a view")
+        } catch let error as PerunError {
+            XCTAssertNotNil(error.sqliteError)
+        }
+
+        // Opting out (directOnly: false) allows use inside a view.
+        try await conn.createFunction("triple_it", argumentCount: 1, directOnly: false) { args in
+            guard case let .integer(n) = args[0] else { return .null }
+            return .integer(n * 3)
+        }
+        try await conn.query("CREATE VIEW v_ok AS SELECT triple_it(2) AS v")
+        let w = try await conn.query("SELECT v FROM v_ok").rows[0].decode("v", as: Int.self)
+        XCTAssertEqual(w, 6)
+    }
+
     func testCustomFunctionThrowSurfacesAsError() async throws {
         let conn = try await SQLiteConnection.connect(.memory())
         defer { Task { try? await conn.close() } }

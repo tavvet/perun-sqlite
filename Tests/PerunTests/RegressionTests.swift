@@ -254,6 +254,24 @@ final class RegressionTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    // Empty / comment-only SQL through a single-statement API reports emptyStatement, not the
+    // nonsensical "SQLite error 0 (ok): not an error". query(_:) treats it as a no-op.
+    func testEmptyStatementRejected() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+
+        for sql in ["", "   ", "-- just a comment"] {
+            do {
+                _ = try await conn.query(sql, [])
+                XCTFail("expected emptyStatement for \(sql.debugDescription)")
+            } catch let error as PerunError {
+                XCTAssertEqual(error, .emptyStatement)
+            }
+        }
+        let result = try await conn.query("-- nothing here")   // multi-statement path: no-op
+        XCTAssertEqual(result.rowCount, 0)
+    }
+
     // Double.nan can't be stored as a REAL (SQLite would silently write NULL); binding it must
     // throw rather than corrupt the row. ±Infinity is representable and round-trips.
     func testBindingNaNThrowsButInfinityRoundTrips() async throws {

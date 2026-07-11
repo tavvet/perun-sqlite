@@ -249,7 +249,10 @@ public actor SQLiteConnection {
     private func applyConfiguration(_ configuration: SQLiteConfiguration) async throws {
         if let busyTimeout = configuration.busyTimeout {
             let components = busyTimeout.components
-            let milliseconds = Int32(clamping: components.seconds * 1000
+            // Cap seconds before the ×1000 so an absurd Duration (e.g. .seconds(.max)) can't
+            // overflow-trap the Int64 multiply; Int32(clamping:) then pins it to Int32.max ms.
+            let cappedSeconds = min(max(components.seconds, 0), Int64(Int32.max))
+            let milliseconds = Int32(clamping: cappedSeconds * 1000
                                      + components.attoseconds / 1_000_000_000_000_000)
             let db = handle
             _ = try await withBlockingIO(on: ioQueue) { sqlite3_busy_timeout(db.db, milliseconds) }
@@ -987,9 +990,13 @@ func perunCompileSingle(_ sql: String, db: OpaquePointer) throws -> OpaquePointe
     try sql.withCString { cString in
         var stmt: OpaquePointer?
         var tail: UnsafePointer<CChar>?
-        guard sqlite3_prepare_v2(db, cString, -1, &stmt, &tail) == SQLITE_OK, let stmt else {
+        guard sqlite3_prepare_v2(db, cString, -1, &stmt, &tail) == SQLITE_OK else {
             throw perunSQLiteError(db)
         }
+        // prepare returns SQLITE_OK with a nil statement for empty / whitespace / comment-only SQL.
+        // Report that as such instead of `perunSQLiteError`, which would read the handle's (success)
+        // error state and throw a nonsensical "SQLite error 0 (ok): not an error".
+        guard let stmt else { throw PerunError.emptyStatement }
         // Everything after the first statement except whitespace/comments is rejected. Let SQLite
         // parse the tail: a real second statement → multipleStatements; SQL that fails to compile
         // (e.g. `SELECT 1; garbage`) surfaces its own error rather than being silently dropped.

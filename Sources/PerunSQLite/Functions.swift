@@ -31,12 +31,18 @@ extension SQLiteConnection {
     ///   - argumentCount: the exact number of arguments, or `nil` for variadic (any arity).
     ///   - deterministic: whether the function returns the same result for the same inputs (lets
     ///     SQLite use it in more contexts, e.g. indexes on expressions).
+    ///   - directOnly: when `true` (the default, and SQLite's recommendation for app-defined
+    ///     functions) the function may be called only from top-level SQL — not from triggers,
+    ///     views, `CHECK` constraints, `DEFAULT` clauses, index expressions, or generated columns.
+    ///     That stops a maliciously crafted database file from invoking your Swift code through
+    ///     schema it embeds. Set it `false` if you deliberately need the function in those places.
     ///   - implementation: maps the argument values to a result. Throwing surfaces to SQL as a
     ///     function error.
     public func createFunction(
         _ name: String,
         argumentCount: Int? = nil,
         deterministic: Bool = false,
+        directOnly: Bool = true,
         _ implementation: @escaping @Sendable ([SQLiteValue]) throws -> SQLiteValue
     ) async throws {
         try ensureOpen()
@@ -50,6 +56,7 @@ extension SQLiteConnection {
         let functionName = name
         let argCount = argumentCount.map { Int32($0) } ?? -1      // now guaranteed 0…127 or -1 (variadic)
         let isDeterministic = deterministic
+        let isDirectOnly = directOnly
 
         try await withBlockingIO(on: ioQueue) {
             guard !db.closed else { throw PerunError.connectionClosed }
@@ -58,6 +65,7 @@ extension SQLiteConnection {
             let context = Unmanaged.passRetained(box).toOpaque()
             var flags = SQLITE_UTF8
             if isDeterministic { flags |= SQLITE_DETERMINISTIC }
+            if isDirectOnly { flags |= SQLITE_DIRECTONLY }
             let rc = sqlite3_create_function_v2(
                 db.db, functionName, argCount, flags, context,
                 { context, argumentCount, arguments in

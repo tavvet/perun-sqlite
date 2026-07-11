@@ -236,6 +236,9 @@ public enum PerunError: Error, CustomStringConvertible, Sendable, Equatable {
     /// A single-statement API (`query(_:_:)`, `prepare`, `queryStream`) was given SQL containing
     /// more than one statement. Use `query(_:)` (no parameters) to run several statements.
     case multipleStatements
+    /// A single-statement API was given SQL that compiled to no statement at all — empty,
+    /// whitespace, or comment-only. (`query(_:)` runs such SQL as a no-op instead.)
+    case emptyStatement
     /// `createFunction` was given an argument count outside SQLite's allowed range: it must be
     /// `nil` (variadic) or `0…127` (values above 127 are undefined behavior in the C API).
     case invalidArgumentCount(Int)
@@ -276,6 +279,8 @@ public enum PerunError: Error, CustomStringConvertible, Sendable, Equatable {
             return "invalid parameter: \(reason)"
         case .multipleStatements:
             return "SQL contains more than one statement; use query(_:) to run several"
+        case .emptyStatement:
+            return "SQL contained no statement (empty, whitespace, or comment-only)"
         case let .invalidArgumentCount(count):
             return "invalid function argument count \(count): must be nil (variadic) or 0…127"
         case .preparedStatementConnectionMismatch:
@@ -324,7 +329,7 @@ extension PerunError {
                 return false
             }
         case .unexpectedNull, .columnNotFound, .decodingFailed, .parameterCountMismatch,
-             .invalidParameter, .multipleStatements, .invalidArgumentCount,
+             .invalidParameter, .multipleStatements, .emptyStatement, .invalidArgumentCount,
              .preparedStatementConnectionMismatch,
              .invalidTransactionContext, .transactionRolledBack, .clientShutdown, .timedOut:
             // A rolled-back transaction leaves the connection perfectly usable (autocommit is back
