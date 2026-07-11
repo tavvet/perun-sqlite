@@ -241,6 +241,11 @@ public enum PerunError: Error, CustomStringConvertible, Sendable, Equatable {
     /// A `Transaction` handle was used after its `withTransaction` scope had already ended (e.g.
     /// it escaped the closure). Its statements would run outside the transaction.
     case invalidTransactionContext
+    /// SQLite rolled the transaction back on its own before `withTransaction` could commit — an
+    /// `ON CONFLICT ROLLBACK` clause, or a fatal error (`SQLITE_FULL` / `SQLITE_IOERR` / …). No
+    /// changes made inside the transaction were committed. Thrown instead of silently letting the
+    /// statements that ran after the rollback commit one at a time.
+    case transactionRolledBack
     /// An operation was requested on a pool that has been shut down.
     case clientShutdown
     /// An operation wrapped in `withTimeout` did not finish before its deadline. The underlying
@@ -271,6 +276,8 @@ public enum PerunError: Error, CustomStringConvertible, Sendable, Equatable {
             return "prepared statement belongs to a different connection"
         case .invalidTransactionContext:
             return "transaction handle used outside its withTransaction scope"
+        case .transactionRolledBack:
+            return "the transaction was rolled back by SQLite before it could commit; no changes were committed"
         case .clientShutdown:
             return "the connection pool has been shut down"
         case .timedOut:
@@ -312,7 +319,9 @@ extension PerunError {
             }
         case .unexpectedNull, .columnNotFound, .decodingFailed, .parameterCountMismatch,
              .multipleStatements, .invalidArgumentCount, .preparedStatementConnectionMismatch,
-             .invalidTransactionContext, .clientShutdown, .timedOut:
+             .invalidTransactionContext, .transactionRolledBack, .clientShutdown, .timedOut:
+            // A rolled-back transaction leaves the connection perfectly usable (autocommit is back
+            // on), so the pool keeps it.
             return false
         }
     }

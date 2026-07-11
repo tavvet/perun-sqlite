@@ -225,4 +225,57 @@ final class RegressionTests: XCTestCase {
             XCTAssertEqual(error, .multipleStatements)
         }
     }
+
+    // A transaction SQLite auto-rolls-back mid-body (ON CONFLICT ROLLBACK) must not let the
+    // statements after the rollback commit one at a time: the next statement fails loudly and no
+    // change from the transaction survives.
+    func testAutoRollbackMidTransactionIsSurfaced() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.query("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)")
+        try await conn.query("INSERT INTO t (id, v) VALUES (1, 100)")
+
+        do {
+            try await conn.withTransaction { tx in
+                try await tx.query("INSERT INTO t (id, v) VALUES (2, 200)")          // part of the tx
+                // Violates the primary key with OR ROLLBACK, aborting the whole transaction.
+                _ = try? await tx.query("INSERT OR ROLLBACK INTO t (id, v) VALUES (1, 999)")
+                // Body swallowed the error and keeps writing — this must be rejected, not committed.
+                try await tx.query("INSERT INTO t (id, v) VALUES (3, 300)")
+                XCTFail("expected transactionRolledBack once the transaction was aborted")
+            }
+            XCTFail("expected withTransaction to throw transactionRolledBack")
+        } catch let error as PerunError {
+            XCTAssertEqual(error, .transactionRolledBack)
+        }
+
+        // Atomicity held: neither id=2 (written before the abort) nor id=3 (after) persisted.
+        let count = try await conn.query("SELECT count(*) AS n FROM t").rows[0].decode("n", as: Int.self)
+        XCTAssertEqual(count, 1)
+    }
+
+    // The auto-rollback guard must not disturb an ordinary transaction: commit and rollback both
+    // behave, and the connection stays usable afterwards.
+    func testNormalTransactionsStillCommitAndRollback() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.query("CREATE TABLE t (v INTEGER)")
+
+        try await conn.withTransaction { tx in
+            for value in 1...3 { try await tx.query("INSERT INTO t (v) VALUES (?)", [value]) }
+        }
+        var count = try await conn.query("SELECT count(*) AS n FROM t").rows[0].decode("n", as: Int.self)
+        XCTAssertEqual(count, 3)
+
+        struct Boom: Error {}
+        do {
+            try await conn.withTransaction { tx in
+                try await tx.query("INSERT INTO t (v) VALUES (99)")
+                throw Boom()
+            }
+            XCTFail("expected the body error to propagate")
+        } catch is Boom {}
+        count = try await conn.query("SELECT count(*) AS n FROM t").rows[0].decode("n", as: Int.self)
+        XCTAssertEqual(count, 3)          // the rolled-back INSERT left no trace
+    }
 }

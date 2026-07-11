@@ -407,9 +407,20 @@ public actor SQLiteConnection {
     /// `body` throws. Transaction control (BEGIN/COMMIT/ROLLBACK) runs uninterruptibly, so a
     /// timed-out transaction still rolls back cleanly rather than leaving one open.
     ///
+    /// SQLite can roll a transaction back on its own — an `ON CONFLICT ROLLBACK` clause, or a fatal
+    /// error like `SQLITE_FULL`. If that happens mid-`body` and `body` swallows the error, the
+    /// remaining statements would otherwise run in autocommit and persist one at a time, quietly
+    /// breaking atomicity. To prevent that, each statement checks the transaction is still open
+    /// first, and `throw`s `PerunError.transactionRolledBack` once it is gone.
+    ///
     /// SQLite has no nested transactions, so calling this again on the same connection while a
     /// transaction is open throws (its `BEGIN` is rejected) — but the outer transaction's context
     /// is saved and restored, so it stays usable afterward. Use `SAVEPOINT` SQL if you need nesting.
+    ///
+    /// If the closing `ROLLBACK` itself fails (rare — on modern SQLite a pending read no longer
+    /// blocks it), the connection may remain inside the aborted transaction. The pool discards such
+    /// a connection on release (it checks `isInTransaction`); a directly held connection should not
+    /// be reused until the transaction is resolved.
     public func withTransaction<T: Sendable>(
         kind: TransactionKind = .deferred,
         _ body: @Sendable (Transaction) async throws -> T
@@ -424,6 +435,11 @@ public actor SQLiteConnection {
         try await _execUninterruptible(kind.beginSQL)
         do {
             let result = try await body(Transaction(connection: self, contextID: contextID))
+            // If SQLite auto-rolled-back the transaction under us (and `body` swallowed the error),
+            // there is nothing to commit; committing now would be a no-op that hides the break.
+            guard try await currentlyInTransaction() else {
+                throw PerunError.transactionRolledBack
+            }
             try await _execUninterruptible("COMMIT")
             return result
         } catch {
@@ -438,15 +454,35 @@ public actor SQLiteConnection {
         }
     }
 
-    private func runTransactionMultiStatement(_ sql: String, contextID: Int) async throws -> QueryResult {
+    /// Whether the connection is currently inside an open transaction (`sqlite3_get_autocommit`),
+    /// throwing rather than swallowing a closed-handle error (unlike the public `isInTransaction`).
+    private func currentlyInTransaction() async throws -> Bool {
+        let db = handle
+        return try await withBlockingIO(on: ioQueue) {
+            guard !db.closed else { throw PerunError.connectionClosed }
+            return sqlite3_get_autocommit(db.db) == 0
+        }
+    }
+
+    /// Validate the transaction context, then confirm SQLite has not rolled the transaction back
+    /// on its own. Guards every statement run through a `Transaction`, so a statement after an
+    /// auto-rollback fails loudly instead of committing in autocommit.
+    private func ensureTransactionActive(_ contextID: Int) async throws {
         try validateTransactionContext(contextID)
+        guard try await currentlyInTransaction() else {
+            throw PerunError.transactionRolledBack
+        }
+    }
+
+    private func runTransactionMultiStatement(_ sql: String, contextID: Int) async throws -> QueryResult {
+        try await ensureTransactionActive(contextID)
         return try await _runMultiStatement(sql)
     }
 
     private func runTransactionQuery(_ sql: String,
                                      _ parameters: [(any SQLiteEncodable)?],
                                      contextID: Int) async throws -> QueryResult {
-        try validateTransactionContext(contextID)
+        try await ensureTransactionActive(contextID)
         return try await _runSingleStatement(sql, parameters)
     }
 
@@ -458,7 +494,7 @@ public actor SQLiteConnection {
     private func runTransactionExecute(_ statement: PreparedStatement,
                                        _ parameters: [(any SQLiteEncodable)?],
                                        contextID: Int) async throws -> QueryResult {
-        try validateTransactionContext(contextID)
+        try await ensureTransactionActive(contextID)
         return try await _execute(statement, parameters)
     }
 
