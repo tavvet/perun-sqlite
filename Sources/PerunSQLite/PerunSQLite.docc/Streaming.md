@@ -21,7 +21,10 @@ steps more slowly.
 ## Stopping early
 
 Stopping before the end — a `break`, a thrown error, or just dropping the stream — finalises the
-underlying statement immediately, so the connection is reusable right away:
+underlying statement as the stream and its iterator are dropped. That cleanup is asynchronous (it
+runs from the stream's `deinit`), so it happens shortly after the loop exits rather than exactly at
+the `break`; keep the stream scoped to where you consume it, and don't fire other work on the *same*
+connection until you have finished with it:
 
 ```swift
 for try await row in try await connection.queryStream("SELECT id FROM big ORDER BY id") {

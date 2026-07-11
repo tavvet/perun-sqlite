@@ -9,7 +9,8 @@
 ///
 /// Each `for await` step runs one `sqlite3_step`, so a large result never all lives in memory at
 /// once, and a slow consumer simply steps more slowly. Stopping early (a `break`, an error, or
-/// dropping the stream) finalizes the underlying statement and frees it.
+/// dropping the stream) finalizes the underlying statement and frees it — asynchronously, from the
+/// stream's `deinit`, so shortly after the loop exits rather than exactly at the `break`.
 ///
 /// Unlike the PostgreSQL driver's stream, this does not seize an exclusive wire lock — there is no
 /// wire. A `SQLiteConnection` serializes its calls, and is intended for one logical task at a

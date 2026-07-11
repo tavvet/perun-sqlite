@@ -18,7 +18,7 @@ func runStreaming() async throws {
     }
     print("streamed \(counted) rows; total weight = \(total)")
 
-    // Stopping early frees the statement immediately — the connection is reusable.
+    // Stopping early frees the statement as the stream is dropped (asynchronously, from its deinit).
     var firstFew: [Int] = []
     for try await row in try await connection.queryStream("SELECT weight FROM events ORDER BY weight") {
         firstFew.append(try row.decode("weight", as: Int.self))

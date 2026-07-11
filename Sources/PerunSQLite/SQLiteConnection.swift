@@ -163,6 +163,10 @@ public actor SQLiteConnection {
     /// Row-change events (`sqlite3_update_hook`), delivered when the configuration set
     /// `observeDataChanges`. Empty otherwise. The SQLite analogue of perun-pgsql's LISTEN/NOTIFY
     /// `notifications` stream — local to this connection rather than a cross-connection channel.
+    ///
+    /// This is a single `AsyncStream` with **one consumer**: each event is delivered to exactly one
+    /// `for await` loop. Iterating it from two tasks splits the events between them rather than
+    /// broadcasting; fan out in your own code if you need multiple observers.
     public nonisolated let dataChanges: AsyncStream<SQLiteChange>
     let changeContinuation: AsyncStream<SQLiteChange>.Continuation
     /// Retains the box the update hook points at; freed after the hook is removed on close.

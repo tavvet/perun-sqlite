@@ -32,6 +32,9 @@ the ``SQLiteChange/database`` (usually `"main"`), and the affected ``SQLiteChang
 - It reports the fact of a change, not the old or new row values — read those with a query if needed.
 - Events are buffered (newest-wins beyond a bound), so writes may happen before the consumer drains
   them; order is preserved.
+- It has **one consumer**: ``SQLiteConnection/dataChanges`` is a single `AsyncStream`, so each event
+  goes to exactly one `for await` loop. Don't iterate it from two tasks expecting both to see every
+  change — they would split the events between them. Fan out in your own code if you need that.
 
 It's off by default because the hook adds a callback per changed row. Leave `observeDataChanges` unset
 and ``SQLiteConnection/dataChanges`` simply stays empty.
