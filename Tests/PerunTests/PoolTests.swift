@@ -102,6 +102,53 @@ final class PoolTests: XCTestCase {
         XCTAssertEqual(ok, 1)
     }
 
+    // A task cancelled while parked waiting for a connection must leave the queue and fail, not
+    // orphan its slot; the pool stays usable afterwards.
+    func testCancelledWaiterLeavesQueue() async throws {
+        let pool = SQLiteClient(configuration: .memory(), maxConnections: 1)
+        defer { Task { await pool.shutdown() } }
+
+        let holding = Task {
+            try await pool.withConnection { _ in try await Task.sleep(for: .milliseconds(200)) }
+        }
+        try await Task.sleep(for: .milliseconds(20))     // let the holder take the only connection
+        let waiter = Task { try await pool.query("SELECT 1") }
+        try await Task.sleep(for: .milliseconds(20))     // let the waiter park
+        waiter.cancel()
+
+        do {
+            _ = try await waiter.value
+            XCTFail("expected the cancelled waiter to throw")
+        } catch is CancellationError {
+        } catch let error as PerunError {
+            XCTAssertEqual(error, .clientShutdown)       // tolerated only if shutdown raced in
+        }
+        try await holding.value
+        let v = try await pool.query("SELECT 1 AS v").rows[0].decode("v", as: Int.self)
+        XCTAssertEqual(v, 1)
+    }
+
+    // shutdown() must fail every task still parked waiting for a connection with clientShutdown.
+    func testShutdownFailsParkedWaiters() async throws {
+        let pool = SQLiteClient(configuration: .memory(), maxConnections: 1)
+
+        let holding = Task {
+            try await pool.withConnection { _ in try await Task.sleep(for: .milliseconds(300)) }
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        let waiter = Task { try await pool.query("SELECT 1") }
+        try await Task.sleep(for: .milliseconds(20))     // let the waiter park
+        await pool.shutdown()
+
+        do {
+            _ = try await waiter.value
+            XCTFail("expected the parked waiter to fail on shutdown")
+        } catch let error as PerunError {
+            XCTAssertEqual(error, .clientShutdown)
+        }
+        _ = try? await holding.value
+    }
+
     // A connection a borrower closed inside withConnection must not be handed straight to a parked
     // waiter (the acquire() path vets idle connections, but a direct hand-off skips that). The
     // waiter must get a live replacement.

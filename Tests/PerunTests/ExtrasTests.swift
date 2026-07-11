@@ -115,6 +115,41 @@ final class ExtrasTests: XCTestCase {
         XCTAssertEqual(sum, 210)
     }
 
+    // The flagship guarantee: a transaction that times out mid-flight rolls back cleanly, leaves
+    // no partial writes, and the connection is reusable and not stuck in a transaction.
+    func testTimeoutDuringTransactionRollsBack() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.query("CREATE TABLE t (v INTEGER)")
+
+        do {
+            try await withTimeout(.milliseconds(100)) {
+                try await conn.withTransaction { tx in
+                    try await tx.query("INSERT INTO t (v) VALUES (1)")
+                    try await tx.query("""
+                        WITH RECURSIVE c(x) AS (
+                            SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 1000000000
+                        )
+                        INSERT INTO t (v) SELECT count(*) FROM c
+                        """)
+                }
+            }
+            XCTFail("expected the transaction to time out")
+        } catch let error as PerunError {
+            guard case .timedOut = error else { return XCTFail("expected timedOut, got \(error)") }
+        }
+
+        // Rolled back: the INSERT of 1 did not persist.
+        let count = try await conn.query("SELECT count(*) AS n FROM t").rows[0].decode("n", as: Int.self)
+        XCTAssertEqual(count, 0)
+        // Not left inside a transaction, and reusable.
+        let inTx = await conn.isInTransaction
+        XCTAssertFalse(inTx)
+        try await conn.query("INSERT INTO t (v) VALUES (99)")
+        let after = try await conn.query("SELECT count(*) AS n FROM t").rows[0].decode("n", as: Int.self)
+        XCTAssertEqual(after, 1)
+    }
+
     func testTimeoutInterruptsQuery() async throws {
         let conn = try await SQLiteConnection.connect(.memory())
         defer { Task { try? await conn.close() } }
