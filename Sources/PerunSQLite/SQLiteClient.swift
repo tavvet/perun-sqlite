@@ -216,6 +216,11 @@ public actor SQLiteClient {
             await discardAndReplaceIfNeeded(connection)
             return
         }
+        // Finalize any stream the borrower left open past `withConnection`. Otherwise its
+        // half-stepped SELECT rides along to the next borrower — holding a read snapshot (blocking
+        // WAL checkpointing / writers) and putting two tasks on one connection. A no-op for the
+        // common case where streams were drained or broken inside the scope.
+        await connection.finishAllStreams()
         // Recycle a connection past its lifetime instead of reusing it — including on a direct
         // handoff to a waiter, which otherwise skips the on-borrow age check.
         if let maxLifetime = maxConnectionLifetime,

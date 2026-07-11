@@ -101,4 +101,31 @@ final class PoolTests: XCTestCase {
         let ok = try await pool.query("SELECT 1 AS v").rows[0].decode("v", as: Int.self)
         XCTAssertEqual(ok, 1)
     }
+
+    // A stream leaked out of withConnection must not ride along to the next borrower: the pool
+    // finalizes it on release, so the leaked stream is dead and the connection is clean to reuse.
+    func testLingeringStreamFinalizedOnRelease() async throws {
+        let path = tempDatabasePath()
+        defer { removeDatabase(path) }
+        let pool = SQLiteClient(configuration: .file(path, journalMode: .wal), maxConnections: 1)
+        defer { Task { await pool.shutdown() } }
+
+        try await pool.query("CREATE TABLE t (v INTEGER)")
+        for value in 1...5 { try await pool.query("INSERT INTO t (v) VALUES (?)", [value]) }
+
+        // Misuse: let a stream escape the withConnection scope without draining it.
+        let leaked = try await pool.withConnection { conn in
+            try await conn.queryStream("SELECT v FROM t ORDER BY v")
+        }
+
+        // With one connection, this reuses the same handle — release() must have finalized the
+        // leaked stream first. The reuse itself works regardless; the leaked stream being dead is
+        // what proves the connection wasn't handed over with an open statement.
+        let sum = try await pool.query("SELECT sum(v) AS s FROM t").rows[0].decode("s", as: Int.self)
+        XCTAssertEqual(sum, 15)
+
+        var iterator = leaked.makeAsyncIterator()
+        let row = try await iterator.next()
+        XCTAssertNil(row, "the leaked stream should have been finalized when its connection was released")
+    }
 }

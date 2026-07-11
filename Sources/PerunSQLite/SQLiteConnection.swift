@@ -618,6 +618,16 @@ public actor SQLiteConnection {
         }
     }
 
+    /// Finalize every stream still open on this connection. Called by the pool before a returned
+    /// connection is reused, so a stream a borrower left open past `withConnection` can't ride along
+    /// to the next borrower — holding a read snapshot and putting two tasks on one connection. A
+    /// well-behaved borrower drains or breaks its streams inside the scope, leaving nothing here.
+    func finishAllStreams() async {
+        for generation in Array(streams.keys) {
+            await finishStream(generation: generation)
+        }
+    }
+
     func finishStream(generation: UInt64) async {
         guard let state = streams.removeValue(forKey: generation) else { return }
         let statementHandle = state.handle
