@@ -132,11 +132,24 @@ final class TypeTests: XCTestCase {
         XCTAssertThrowsError(try Date.decode(from: .text("2024-01-01 25:00:00")))
     }
 
-    // A non-finite REAL is a legal cell but not a meaningful Julian day — Date must reject it
-    // rather than build a Date with an infinite time interval.
+    // A non-finite REAL — or a finite-but-huge one that overflows when scaled to seconds — is not a
+    // representable Julian day. Date must reject it rather than build a Date with an infinite (or
+    // out-of-range) interval that would trap on re-encode.
     func testDateRejectsNonFiniteReal() throws {
         XCTAssertThrowsError(try Date.decode(from: .real(.infinity)))
         XCTAssertThrowsError(try Date.decode(from: .real(-.infinity)))
+        XCTAssertThrowsError(try Date.decode(from: .real(.greatestFiniteMagnitude)))   // scales to +inf
+        XCTAssertThrowsError(try Date.decode(from: .real(-.greatestFiniteMagnitude)))
+    }
+
+    // Date.encode() can't throw, so an extreme/non-finite interval must clamp to a boundary rather
+    // than trap the Int64 conversion and crash the process.
+    func testDateEncodeDoesNotTrapOnExtremeInterval() {
+        for interval in [Double.infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude] {
+            guard case .text = Date(timeIntervalSince1970: interval).encode() else {
+                return XCTFail("expected .text for interval \(interval)")
+            }
+        }
     }
 
     // A JSON BLOB that isn't valid UTF-8 (i.e. binary JSONB) must error, not decode to mojibake.

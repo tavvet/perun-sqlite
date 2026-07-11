@@ -57,12 +57,16 @@ extension Date: SQLiteDecodable {
         case let .integer(i):
             return Date(timeIntervalSince1970: Double(i))
         case let .real(d):
-            // ±Infinity is a legal REAL cell but not a meaningful Julian day — reject it rather than
-            // build a Date with an infinite time interval.
-            guard d.isFinite else {
-                throw sqliteDecodeError("Date", value, "\(d) is not a finite Julian day")
+            // A finite check on the *input* isn't enough: a huge-but-finite Julian day (e.g.
+            // Double.greatestFiniteMagnitude) overflows to ±Infinity once scaled to seconds, and the
+            // resulting Date would trap on re-encode. Reject anything that maps outside the range
+            // this driver can represent and round-trip (this also rejects ±Infinity and NaN, whose
+            // `abs` is not `< limit`).
+            let date = dateFromJulianDay(d)
+            guard abs(date.timeIntervalSince1970) < Double(Int64.max) / 1_000_000 else {
+                throw sqliteDecodeError("Date", value, "\(d) is out of range for a Date")
             }
-            return dateFromJulianDay(d)
+            return date
         case .blob, .null:
             throw sqliteDecodeError("Date", value)
         }
@@ -130,7 +134,20 @@ func dateFromJulianDay(_ jd: Double) -> Date {
 /// Render a `Date` as ISO-8601 UTC text with microsecond precision: `YYYY-MM-DD HH:MM:SS.ffffff`.
 /// Uses a space separator (SQLite's `datetime()` style); the time is UTC.
 func sqliteISO8601Text(_ date: Date) -> String {
-    let totalMicros = Int64((date.timeIntervalSince1970 * 1_000_000).rounded())
+    let scaled = (date.timeIntervalSince1970 * 1_000_000).rounded()
+    // Date.encode() can't throw, and a caller can hand us a Date with a non-finite or out-of-range
+    // interval (Date arithmetic, distantFuture, a directly-built Date(timeIntervalSince1970: .nan)).
+    // Clamp to the Int64 microsecond range rather than trap the conversion and crash the process.
+    let totalMicros: Int64
+    if !scaled.isFinite {
+        totalMicros = scaled < 0 ? .min : .max
+    } else if scaled >= Double(Int64.max) {
+        totalMicros = .max
+    } else if scaled < Double(Int64.min) {
+        totalMicros = .min
+    } else {
+        totalMicros = Int64(scaled)
+    }
     var seconds = totalMicros / 1_000_000
     var micros = totalMicros - seconds * 1_000_000
     if micros < 0 { micros += 1_000_000; seconds -= 1 }          // floor toward negative infinity
