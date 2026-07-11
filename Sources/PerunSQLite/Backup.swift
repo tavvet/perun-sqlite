@@ -11,9 +11,11 @@ extension SQLiteConnection {
     /// destination's handle directly. Two requirements follow, and the caller must uphold them
     /// (they can't be fully enforced across two connections):
     /// - `destination` must be **exclusively owned** for the duration — no other operation may run
-    ///   on it, or its queue and the source's queue would touch one `sqlite3 *` at once (safe only
-    ///   under SQLite's default serialized threading; a data race otherwise). Typically it is a
-    ///   connection opened just to receive the copy.
+    ///   on it. The copy drives the destination handle from the *source's* queue, so a concurrent
+    ///   operation on the destination would touch one `sqlite3 *` from two threads at once — a data
+    ///   race (this package links the system libsqlite3, which on Apple platforms is built
+    ///   multi-thread, not serialized, so there is no per-connection mutex to fall back on).
+    ///   Typically the destination is a connection opened just to receive the copy.
     /// - The source connection is likewise busy with the copy for the duration (its queue is
     ///   occupied), though *other* connections to the same file may keep reading it.
     ///
@@ -39,7 +41,15 @@ extension SQLiteConnection {
                                                    source.db, sourceName) else {
                 throw perunSQLiteError(destinationHandle.db)
             }
-            let rc = sqlite3_backup_step(backup, -1)        // -1 = copy all remaining pages
+            var rc = sqlite3_backup_step(backup, -1)        // -1 = copy all remaining pages
+            // BUSY/LOCKED from backup_step are transient (a writer holds the source lock as the copy
+            // starts); the step can simply be retried. Bound the retries so a stuck lock can't hang.
+            var attempts = 0
+            while rc == SQLITE_BUSY || rc == SQLITE_LOCKED, attempts < 50 {
+                sqlite3_sleep(100)                          // ms
+                rc = sqlite3_backup_step(backup, -1)
+                attempts += 1
+            }
             let finishRC = sqlite3_backup_finish(backup)
             guard rc == SQLITE_DONE else { throw perunSQLiteError(destinationHandle.db) }
             guard finishRC == SQLITE_OK else { throw perunSQLiteError(destinationHandle.db) }

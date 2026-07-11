@@ -640,6 +640,26 @@ public actor SQLiteConnection {
         }
     }
 
+    /// Ready this connection to go back to the pool, in a single actor hop: finalize any leftover
+    /// streams, then report whether it is still alive (a borrower may have closed it) and whether it
+    /// is mid-transaction. The pool uses both to decide between recycling, discarding, or handing
+    /// the connection straight to a waiter — so a dead or in-transaction connection is never idled
+    /// or passed on.
+    func prepareForReuse() async -> (isAlive: Bool, inTransaction: Bool) {
+        await finishAllStreams()
+        if isClosed { return (isAlive: false, inTransaction: false) }
+        let db = handle
+        do {
+            let inTransaction = try await withBlockingIO(on: ioQueue) {
+                guard !db.closed else { throw PerunError.connectionClosed }
+                return sqlite3_get_autocommit(db.db) == 0
+            }
+            return (isAlive: true, inTransaction: inTransaction)
+        } catch {
+            return (isAlive: false, inTransaction: false)
+        }
+    }
+
     func finishStream(generation: UInt64) async {
         guard let state = streams.removeValue(forKey: generation) else { return }
         let statementHandle = state.handle

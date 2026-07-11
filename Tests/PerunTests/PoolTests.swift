@@ -102,6 +102,33 @@ final class PoolTests: XCTestCase {
         XCTAssertEqual(ok, 1)
     }
 
+    // A connection a borrower closed inside withConnection must not be handed straight to a parked
+    // waiter (the acquire() path vets idle connections, but a direct hand-off skips that). The
+    // waiter must get a live replacement.
+    func testClosedConnectionNotHandedToWaiter() async throws {
+        let path = tempDatabasePath()
+        defer { removeDatabase(path) }
+        let pool = SQLiteClient(configuration: .file(path, journalMode: .wal), maxConnections: 1)
+        defer { Task { await pool.shutdown() } }
+
+        try await pool.query("CREATE TABLE t (v INTEGER)")
+        try await pool.query("INSERT INTO t (v) VALUES (42)")
+
+        // Task A holds the only connection, lets B queue as a waiter, then returns it closed.
+        let a = Task {
+            try await pool.withConnection { conn in
+                try await Task.sleep(for: .milliseconds(100))
+                try await conn.close()
+            }
+        }
+        try await Task.sleep(for: .milliseconds(20))     // let A acquire the connection first
+        let b = Task { try await pool.query("SELECT v FROM t").rows[0].decode("v", as: Int.self) }
+
+        try await a.value
+        let v = try await b.value
+        XCTAssertEqual(v, 42)                             // B got a live replacement, not the corpse
+    }
+
     // A stream leaked out of withConnection must not ride along to the next borrower: the pool
     // finalizes it on release, so the leaked stream is dead and the connection is clean to reuse.
     func testLingeringStreamFinalizedOnRelease() async throws {

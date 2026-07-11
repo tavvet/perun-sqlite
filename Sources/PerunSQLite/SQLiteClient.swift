@@ -204,7 +204,11 @@ public actor SQLiteClient {
             closeDuringShutdown(connection)
             return
         }
-        let inTransaction = await connection.isInTransaction
+        // One hop: finalize any stream the borrower left open past `withConnection` (otherwise its
+        // half-stepped SELECT rides along to the next borrower, holding a read snapshot and putting
+        // two tasks on one connection), and learn whether the connection is still alive and whether
+        // it is mid-transaction.
+        let (isAlive, inTransaction) = await connection.prepareForReuse()
         // Re-check: shutdown() may have run — and drained `idle` — while we were suspended on the
         // await above. Without this we would append to an already-torn-down pool and leak the
         // connection.
@@ -212,15 +216,13 @@ public actor SQLiteClient {
             closeDuringShutdown(connection)
             return
         }
-        guard !inTransaction else {
+        // Discard a connection the borrower closed (don't hand a dead handle to a waiter — the
+        // acquire() path vets idle connections but a direct hand-off would skip that) or one left
+        // mid-transaction.
+        guard isAlive, !inTransaction else {
             await discardAndReplaceIfNeeded(connection)
             return
         }
-        // Finalize any stream the borrower left open past `withConnection`. Otherwise its
-        // half-stepped SELECT rides along to the next borrower — holding a read snapshot (blocking
-        // WAL checkpointing / writers) and putting two tasks on one connection. A no-op for the
-        // common case where streams were drained or broken inside the scope.
-        await connection.finishAllStreams()
         // Recycle a connection past its lifetime instead of reusing it — including on a direct
         // handoff to a waiter, which otherwise skips the on-borrow age check.
         if let maxLifetime = maxConnectionLifetime,
