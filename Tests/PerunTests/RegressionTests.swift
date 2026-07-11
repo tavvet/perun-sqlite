@@ -254,6 +254,34 @@ final class RegressionTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    // PRAGMA journal_mode returns the mode actually in effect rather than erroring; a request that
+    // can't be honored must surface instead of silently running in the wrong mode.
+    func testJournalModeMismatchIsSurfaced() async throws {
+        // WAL is honored on a file database — connect succeeds and the mode sticks.
+        let path = NSTemporaryDirectory() + "perun-jm-\(UUID().uuidString).db"
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: path + suffix)
+            }
+        }
+        let fileConn = try await SQLiteConnection.connect(.file(path, journalMode: .wal))
+        let mode = try await fileConn.query("PRAGMA journal_mode").rows[0][0].string()
+        XCTAssertEqual(mode?.lowercased(), "wal")
+        try? await fileConn.close()
+
+        // WAL cannot apply to a private :memory: database; connect must fail rather than quietly
+        // fall back to rollback-journal mode.
+        do {
+            _ = try await SQLiteConnection.connect(
+                SQLiteConfiguration(path: ":memory:", journalMode: .wal))
+            XCTFail("expected connect to fail when journal_mode can't be honored")
+        } catch let error as PerunError {
+            guard case .connectionFailed = error else {
+                return XCTFail("expected connectionFailed, got \(error)")
+            }
+        }
+    }
+
     // The auto-rollback guard must not disturb an ordinary transaction: commit and rollback both
     // behave, and the connection stays usable afterwards.
     func testNormalTransactionsStillCommitAndRollback() async throws {

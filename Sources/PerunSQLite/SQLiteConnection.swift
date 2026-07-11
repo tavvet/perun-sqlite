@@ -256,7 +256,17 @@ public actor SQLiteConnection {
             _ = try await withBlockingIO(on: ioQueue) { sqlite3_busy_timeout(db.db, milliseconds) }
         }
         if let journalMode = configuration.journalMode {
-            _ = try await _runMultiStatement("PRAGMA journal_mode = \(journalMode.rawValue)")
+            // `PRAGMA journal_mode = X` never errors when the mode can't be honored (WAL on a
+            // `:memory:` or read-only database, an unsupported VFS): it returns a row naming the
+            // mode actually in effect. Compare it, so a pool asking for WAL doesn't silently run in
+            // rollback-journal mode and then hit SQLITE_BUSY under load.
+            let result = try await _runMultiStatement("PRAGMA journal_mode = \(journalMode.rawValue)")
+            let effective = result.first?[0].string()?.lowercased()
+            guard effective == journalMode.rawValue else {
+                throw PerunError.connectionFailed(
+                    "requested journal_mode \"\(journalMode.rawValue)\" but the database is in "
+                    + "\"\(effective ?? "unknown")\" mode (not supported for this database)")
+            }
         }
         if configuration.enableForeignKeys {
             _ = try await _runMultiStatement("PRAGMA foreign_keys = ON")
