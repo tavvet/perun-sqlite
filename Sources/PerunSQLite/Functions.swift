@@ -144,12 +144,13 @@ private func perunSetResult(_ context: OpaquePointer, _ value: SQLiteValue) {
     case let .text(string):
         var string = string
         string.withUTF8 { buffer in
+            // _64 length is UInt64, so a >2 GiB result returns an error instead of trapping Int32.
             if let base = buffer.baseAddress {
-                sqlite3_result_text(context,
-                                    UnsafeRawPointer(base).assumingMemoryBound(to: CChar.self),
-                                    Int32(buffer.count), SQLITE_TRANSIENT)
+                sqlite3_result_text64(context,
+                                      UnsafeRawPointer(base).assumingMemoryBound(to: CChar.self),
+                                      UInt64(buffer.count), SQLITE_TRANSIENT, UInt8(SQLITE_UTF8))
             } else {
-                sqlite3_result_text(context, "", 0, SQLITE_TRANSIENT)
+                sqlite3_result_text64(context, "", 0, SQLITE_TRANSIENT, UInt8(SQLITE_UTF8))
             }
         }
     case let .blob(bytes):
@@ -157,10 +158,10 @@ private func perunSetResult(_ context: OpaquePointer, _ value: SQLiteValue) {
             guard let base = raw.baseAddress else {
                 // An empty array can yield a nil base pointer, and result_blob(NULL, 0) sets SQL
                 // NULL, not an empty BLOB. Use a valid zero-length pointer (mirrors perunBindBlob).
-                sqlite3_result_blob(context, "", 0, SQLITE_TRANSIENT)
+                sqlite3_result_blob64(context, "", 0, SQLITE_TRANSIENT)
                 return
             }
-            sqlite3_result_blob(context, base, Int32(raw.count), SQLITE_TRANSIENT)
+            sqlite3_result_blob64(context, base, UInt64(raw.count), SQLITE_TRANSIENT)
         }
     }
 }

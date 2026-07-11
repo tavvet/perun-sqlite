@@ -897,6 +897,12 @@ func perunBindParameters(_ parameters: [(any SQLiteEncodable)?],
         case let .some(.integer(value)):
             rc = sqlite3_bind_int64(stmt, index, value)
         case let .some(.real(value)):
+            // SQLite has no NaN in a REAL cell: sqlite3_bind_double would silently store NULL.
+            // Refuse it so the value can't turn into a NULL nobody asked for. (±Infinity is fine.)
+            guard !value.isNaN else {
+                throw PerunError.invalidParameter(
+                    reason: "SQLite cannot store Double.nan as REAL (it would become NULL)")
+            }
             rc = sqlite3_bind_double(stmt, index, value)
         case let .some(.text(string)):
             rc = perunBindText(stmt, index, string)
@@ -911,12 +917,14 @@ private func perunBindText(_ stmt: OpaquePointer, _ index: Int32, _ string: Stri
     var string = string
     return string.withUTF8 { buffer in
         guard let base = buffer.baseAddress else {
-            return sqlite3_bind_text(stmt, index, "", 0, SQLITE_TRANSIENT)
+            return sqlite3_bind_text64(stmt, index, "", 0, SQLITE_TRANSIENT, UInt8(SQLITE_UTF8))
         }
         // Bind the exact byte length (so embedded NULs survive) and let SQLite copy (TRANSIENT).
-        return sqlite3_bind_text(stmt, index,
-                                 UnsafeRawPointer(base).assumingMemoryBound(to: CChar.self),
-                                 Int32(buffer.count), SQLITE_TRANSIENT)
+        // The _64 variant takes a UInt64 length, so a >2 GiB value returns SQLITE_TOOBIG instead of
+        // trapping the Int32 conversion.
+        return sqlite3_bind_text64(stmt, index,
+                                   UnsafeRawPointer(base).assumingMemoryBound(to: CChar.self),
+                                   UInt64(buffer.count), SQLITE_TRANSIENT, UInt8(SQLITE_UTF8))
     }
 }
 
@@ -925,9 +933,10 @@ private func perunBindBlob(_ stmt: OpaquePointer, _ index: Int32, _ bytes: [UInt
         guard let base = raw.baseAddress else {
             // An empty array can yield a nil base pointer, and bind_blob(NULL, 0) binds SQL NULL,
             // not an empty BLOB. Bind a valid zero-length pointer instead (mirrors the text path).
-            return sqlite3_bind_blob(stmt, index, "", 0, SQLITE_TRANSIENT)
+            return sqlite3_bind_blob64(stmt, index, "", 0, SQLITE_TRANSIENT)
         }
-        return sqlite3_bind_blob(stmt, index, base, Int32(raw.count), SQLITE_TRANSIENT)
+        // _64 length is UInt64, so a >2 GiB blob returns SQLITE_TOOBIG rather than trapping Int32.
+        return sqlite3_bind_blob64(stmt, index, base, UInt64(raw.count), SQLITE_TRANSIENT)
     }
 }
 

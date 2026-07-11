@@ -254,6 +254,27 @@ final class RegressionTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    // Double.nan can't be stored as a REAL (SQLite would silently write NULL); binding it must
+    // throw rather than corrupt the row. ±Infinity is representable and round-trips.
+    func testBindingNaNThrowsButInfinityRoundTrips() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.query("CREATE TABLE t (v REAL)")
+
+        do {
+            try await conn.query("INSERT INTO t (v) VALUES (?)", [Double.nan])
+            XCTFail("expected NaN binding to throw")
+        } catch let error as PerunError {
+            guard case .invalidParameter = error else {
+                return XCTFail("expected invalidParameter, got \(error)")
+            }
+        }
+
+        try await conn.query("INSERT INTO t (v) VALUES (?)", [Double.infinity])
+        let v = try await conn.query("SELECT v FROM t").rows[0].decode("v", as: Double.self)
+        XCTAssertEqual(v, .infinity)
+    }
+
     // Cancelling one operation must interrupt only that operation — never a different one running
     // concurrently on the same connection. Regression: a single scalar "running" marker let a
     // queued operation's cancellation misfire sqlite3_interrupt at whatever was actually running.

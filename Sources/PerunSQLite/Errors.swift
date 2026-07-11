@@ -229,6 +229,10 @@ public enum PerunError: Error, CustomStringConvertible, Sendable, Equatable {
     case decodingFailed(type: String, storageClass: String, reason: String)
     /// The parameter array's length did not match the statement's `?` placeholder count.
     case parameterCountMismatch(expected: Int, got: Int)
+    /// A parameter value cannot be represented in SQLite and was refused rather than bound to
+    /// something surprising — e.g. a `Double.nan`, which `sqlite3_bind_double` would silently store
+    /// as SQL NULL.
+    case invalidParameter(reason: String)
     /// A single-statement API (`query(_:_:)`, `prepare`, `queryStream`) was given SQL containing
     /// more than one statement. Use `query(_:)` (no parameters) to run several statements.
     case multipleStatements
@@ -268,6 +272,8 @@ public enum PerunError: Error, CustomStringConvertible, Sendable, Equatable {
             return "could not decode \(type) from \(storageClass): \(reason)"
         case let .parameterCountMismatch(expected, got):
             return "parameter count mismatch: statement expects \(expected), got \(got)"
+        case let .invalidParameter(reason):
+            return "invalid parameter: \(reason)"
         case .multipleStatements:
             return "SQL contains more than one statement; use query(_:) to run several"
         case let .invalidArgumentCount(count):
@@ -318,7 +324,8 @@ extension PerunError {
                 return false
             }
         case .unexpectedNull, .columnNotFound, .decodingFailed, .parameterCountMismatch,
-             .multipleStatements, .invalidArgumentCount, .preparedStatementConnectionMismatch,
+             .invalidParameter, .multipleStatements, .invalidArgumentCount,
+             .preparedStatementConnectionMismatch,
              .invalidTransactionContext, .transactionRolledBack, .clientShutdown, .timedOut:
             // A rolled-back transaction leaves the connection perfectly usable (autocommit is back
             // on), so the pool keeps it.
