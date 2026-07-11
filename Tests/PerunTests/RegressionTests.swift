@@ -254,6 +254,36 @@ final class RegressionTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    // Cancelling one operation must interrupt only that operation — never a different one running
+    // concurrently on the same connection. Regression: a single scalar "running" marker let a
+    // queued operation's cancellation misfire sqlite3_interrupt at whatever was actually running.
+    func testCancellingOneOperationDoesNotInterruptAnother() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        // A scalar function that occupies the connection's serial queue for a set time.
+        try await conn.createFunction("perun_block_ms", argumentCount: 1) { args in
+            guard case let .integer(ms) = args[0] else { return .null }
+            Thread.sleep(forTimeInterval: Double(ms) / 1000.0)
+            return .integer(ms)
+        }
+
+        // A: occupies the connection for ~300ms. It is never cancelled and must succeed.
+        async let longResult: Int = conn.query("SELECT perun_block_ms(300) AS v")
+            .rows[0].decode("v", as: Int.self)
+
+        try await Task.sleep(for: .milliseconds(50))     // let A start running on the ioQueue
+
+        // B: queued behind A on the same connection, then cancelled. Its cancellation must not
+        // interrupt A.
+        let b = Task { try await conn.query("SELECT perun_block_ms(1) AS v") }
+        try await Task.sleep(for: .milliseconds(10))
+        b.cancel()
+        _ = try? await b.value
+
+        let v = try await longResult
+        XCTAssertEqual(v, 300)                            // A completed uninterrupted
+    }
+
     // PRAGMA journal_mode returns the mode actually in effect rather than erroring; a request that
     // can't be honored must surface instead of silently running in the wrong mode.
     func testJournalModeMismatchIsSurfaced() async throws {

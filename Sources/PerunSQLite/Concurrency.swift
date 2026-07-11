@@ -1,5 +1,10 @@
 import Dispatch
 import CSQLite
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Bridge a blocking libsqlite3 call into async/await.
 ///
@@ -41,7 +46,80 @@ final class SQLiteHandle: @unchecked Sendable {
     /// what closes the `close()`-vs-in-flight-operation use-after-free window (the actor-side
     /// `isClosed`/`ensureOpen()` guard alone doesn't order against the queued free).
     var closed = false
-    init(_ db: OpaquePointer) { self.db = db }
+
+    // MARK: Interrupt coordination
+    //
+    // `sqlite3_interrupt` has to be called from a thread *other* than the one blocked in
+    // `sqlite3_step`, so which operation is executing can't be tracked in the connection actor (it
+    // is suspended across the blocking call) — it lives here, under a mutex, written on the
+    // `ioQueue` around the step and read from the task-cancellation handler. Interrupting only the
+    // generation that is genuinely running is what stops a cancel from hitting a *different*
+    // concurrent operation, or a later one that reused the connection.
+    private let interruptMutex = UnsafeMutablePointer<pthread_mutex_t>.allocate(capacity: 1)
+    private var generationCounter: UInt64 = 0
+    private var runningGeneration: UInt64?
+    private var interruptsDisabled = false
+
+    init(_ db: OpaquePointer) {
+        self.db = db
+        pthread_mutex_init(interruptMutex, nil)
+    }
+
+    deinit {
+        pthread_mutex_destroy(interruptMutex)
+        interruptMutex.deallocate()
+    }
+
+    @inline(__always)
+    private func withInterruptLock<T>(_ body: () -> T) -> T {
+        pthread_mutex_lock(interruptMutex)
+        defer { pthread_mutex_unlock(interruptMutex) }
+        return body()
+    }
+
+    /// A fresh, monotonically increasing operation id. Each cancellable operation takes one and
+    /// carries it into `beginRunning`/`interruptIfRunning`.
+    func nextGeneration() -> UInt64 {
+        withInterruptLock {
+            generationCounter += 1
+            return generationCounter
+        }
+    }
+
+    /// Mark `generation` as the operation now executing on the `ioQueue`. Call it on the `ioQueue`,
+    /// immediately before stepping.
+    func beginRunning(_ generation: UInt64) {
+        withInterruptLock { runningGeneration = generation }
+    }
+
+    /// Clear the running marker for `generation`. Call it on the `ioQueue`, immediately after the
+    /// step returns — so the window in which a stray interrupt could land on nothing is a couple of
+    /// instructions rather than an actor hop.
+    func endRunning(_ generation: UInt64) {
+        withInterruptLock { if runningGeneration == generation { runningGeneration = nil } }
+    }
+
+    /// Interrupt the connection *iff* `generation` is the operation currently executing — never a
+    /// different concurrent one, an already-finished one, or one on a closed handle. The lock is
+    /// held across `sqlite3_interrupt` so an adjacent operation can't begin or end underneath the
+    /// decision. (On SQLite < 3.41 an interrupt that still races a step's completion by a few
+    /// instructions can affect the next statement; ≥ 3.41 it is a no-op.)
+    func interruptIfRunning(_ generation: UInt64) {
+        withInterruptLock {
+            if !interruptsDisabled, runningGeneration == generation {
+                sqlite3_interrupt(db)
+            }
+        }
+    }
+
+    /// Disable interrupts for good. Called on the `ioQueue` just before `sqlite3_close_v2`, so a
+    /// cancellation racing the close can never fire `sqlite3_interrupt` on a freed handle.
+    func disableInterrupts() {
+        withInterruptLock {
+            interruptsDisabled = true
+            runningGeneration = nil
+        }
+    }
 }
 
 /// Wraps a non-`Sendable` `sqlite3_stmt *` for the same reason. `stmt` is `nil` once finalized,

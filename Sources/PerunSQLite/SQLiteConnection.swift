@@ -178,10 +178,9 @@ public actor SQLiteConnection {
     private var streams: [UInt64: StreamState] = [:]
     private var streamGeneration: UInt64 = 0
 
-    /// Guards `sqlite3_interrupt` so a cancel fires only against the statement it was meant for,
-    /// never a later one that reused the connection.
-    private var currentOpGeneration: UInt64 = 0
-    private var runningOpGeneration: UInt64?
+    // Interrupt bookkeeping (which operation is running, and firing `sqlite3_interrupt` only at it)
+    // lives in the `SQLiteHandle` box: it must be reachable from the task-cancellation handler
+    // while the actor is suspended across the blocking C call, so it can't be actor state.
 
     /// Transaction context tracking, so a `Transaction` handle can't be used after its scope ends.
     private var transactionContextCounter = 0
@@ -546,7 +545,8 @@ public actor SQLiteConnection {
                 sqlite3_finalize(handle.stmt)
                 handle.stmt = nil
             }
-            db.closed = true       // block any later ioQueue op before we free the handle
+            db.disableInterrupts()  // so a racing cancel can't sqlite3_interrupt a freed handle
+            db.closed = true        // block any later ioQueue op before we free the handle
             sqlite3_close_v2(db.db)
             return ()
         }
@@ -571,6 +571,7 @@ public actor SQLiteConnection {
                 sqlite3_finalize(handle.stmt)
                 handle.stmt = nil
             }
+            db.disableInterrupts()
             db.closed = true
             sqlite3_close_v2(db.db)
         }
@@ -583,23 +584,21 @@ public actor SQLiteConnection {
         let statementHandle = state.handle
         let columns = state.columns
         let columnCount = Int32(columns.count)
-        let db = handle
-
-        currentOpGeneration += 1
-        let operationGeneration = currentOpGeneration
-        runningOpGeneration = operationGeneration
-        defer { if runningOpGeneration == operationGeneration { runningOpGeneration = nil } }
+        let box = handle
+        let operationGeneration = box.nextGeneration()
 
         let outcome: Result<[SQLiteValue]?, Error> = await withTaskCancellationHandler {
             do {
                 let row: [SQLiteValue]? = try await withBlockingIO(on: ioQueue) {
+                    box.beginRunning(operationGeneration)
+                    defer { box.endRunning(operationGeneration) }
                     // Guard the handle as well as the statement: a concurrent close() nils the stmt
-                    // on this same queue, but check db.closed too so we never step on a closed handle.
-                    guard !db.closed, let stmt = statementHandle.stmt else { return nil }
+                    // on this same queue, but check closed too so we never step on a closed handle.
+                    guard !box.closed, let stmt = statementHandle.stmt else { return nil }
                     switch sqlite3_step(stmt) {
                     case SQLITE_ROW: return perunReadRow(stmt, columnCount)
                     case SQLITE_DONE: return nil
-                    default: throw perunSQLiteError(db.db)
+                    default: throw perunSQLiteError(box.db)
                     }
                 }
                 return .success(row)
@@ -607,7 +606,7 @@ public actor SQLiteConnection {
                 return .failure(error)
             }
         } onCancel: {
-            Task { await self.interruptIfRunning(generation: operationGeneration) }
+            box.interruptIfRunning(operationGeneration)
         }
 
         if Task.isCancelled {
@@ -654,27 +653,30 @@ public actor SQLiteConnection {
 
     /// Run a cancellable blocking operation: a cancel fires `sqlite3_interrupt` so a blocked
     /// `sqlite3_step` unblocks and returns `SQLITE_INTERRUPT`, and the caller sees
-    /// `CancellationError`. The generation guard stops a late cancel from hitting a later
-    /// operation on the same connection. This is what makes `withTimeout` stop a query promptly.
+    /// `CancellationError`. The running marker is set and cleared on the `ioQueue` around the call
+    /// and read under a lock, so a cancel interrupts only the operation actually executing — not a
+    /// different concurrent one, nor a later one that reused the connection. This is what makes
+    /// `withTimeout` stop a query promptly.
     private func runCancellable<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
-        currentOpGeneration += 1
-        let operationGeneration = currentOpGeneration
-        runningOpGeneration = operationGeneration
-        defer { if runningOpGeneration == operationGeneration { runningOpGeneration = nil } }
+        let box = handle
+        let generation = box.nextGeneration()
 
         let outcome: Result<T, Error> = await withTaskCancellationHandler {
-            do { return .success(try await withBlockingIO(on: ioQueue, body)) }
-            catch { return .failure(error) }
+            do {
+                let value = try await withBlockingIO(on: ioQueue) {
+                    box.beginRunning(generation)
+                    defer { box.endRunning(generation) }
+                    return try body()
+                }
+                return .success(value)
+            } catch {
+                return .failure(error)
+            }
         } onCancel: {
-            Task { await self.interruptIfRunning(generation: operationGeneration) }
+            box.interruptIfRunning(generation)
         }
         if Task.isCancelled { throw CancellationError() }
         return try outcome.get()
-    }
-
-    private func interruptIfRunning(generation: UInt64) {
-        guard !isClosed, runningOpGeneration == generation else { return }
-        sqlite3_interrupt(handle.db)
     }
 
     // MARK: - Non-public primitives (no transaction-context checks)
