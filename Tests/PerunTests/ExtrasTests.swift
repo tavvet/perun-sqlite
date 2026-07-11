@@ -28,6 +28,24 @@ final class ExtrasTests: XCTestCase {
         XCTAssertEqual(matches, 2)   // triple(v) > 9 ⇒ v > 3 ⇒ v ∈ {4, 5}
     }
 
+    // A custom function returning Double.nan must surface a SQL error, not a silent NULL (matching
+    // the bind path). ±Infinity stays a REAL.
+    func testCustomFunctionNaNResultSurfacesError() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.createFunction("nan_fn", argumentCount: 0) { _ in .real(.nan) }
+        try await conn.createFunction("inf_fn", argumentCount: 0) { _ in .real(.infinity) }
+
+        do {
+            _ = try await conn.query("SELECT nan_fn() AS v")
+            XCTFail("expected NaN function result to surface an error")
+        } catch let error as PerunError {
+            XCTAssertNotNil(error.sqliteError)
+        }
+        let ty = try await conn.query("SELECT typeof(inf_fn()) AS ty").rows[0].decode("ty", as: String.self)
+        XCTAssertEqual(ty, "real")
+    }
+
     func testDirectOnlyFunctionRejectedInSchema() async throws {
         let conn = try await SQLiteConnection.connect(.memory())
         defer { Task { try? await conn.close() } }
@@ -148,6 +166,29 @@ final class ExtrasTests: XCTestCase {
         try await conn.query("INSERT INTO t (v) VALUES (99)")
         let after = try await conn.query("SELECT count(*) AS n FROM t").rows[0].decode("n", as: Int.self)
         XCTAssertEqual(after, 1)
+    }
+
+    // Even if the transaction body swallows the cancellation (e.g. `try? await Task.sleep`), a
+    // timed-out transaction must still roll back — not reach the uninterruptible COMMIT.
+    func testTimeoutRollsBackEvenWhenBodySwallowsCancellation() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.query("CREATE TABLE t (v INTEGER)")
+
+        do {
+            try await withTimeout(.milliseconds(100)) {
+                try await conn.withTransaction { tx in
+                    try await tx.query("INSERT INTO t (v) VALUES (1)")
+                    try? await Task.sleep(for: .seconds(10))   // swallows the timeout's cancellation
+                }
+            }
+            XCTFail("expected the transaction to time out")
+        } catch let error as PerunError where error == .timedOut {
+        } catch is CancellationError {
+        }
+
+        let count = try await conn.query("SELECT count(*) AS n FROM t").rows[0].decode("n", as: Int.self)
+        XCTAssertEqual(count, 0, "a timed-out transaction must roll back even if body swallowed the cancel")
     }
 
     func testTimeoutInterruptsQuery() async throws {

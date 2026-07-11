@@ -132,6 +132,13 @@ final class TypeTests: XCTestCase {
         XCTAssertThrowsError(try Date.decode(from: .text("2024-01-01 25:00:00")))
     }
 
+    // A non-finite REAL is a legal cell but not a meaningful Julian day — Date must reject it
+    // rather than build a Date with an infinite time interval.
+    func testDateRejectsNonFiniteReal() throws {
+        XCTAssertThrowsError(try Date.decode(from: .real(.infinity)))
+        XCTAssertThrowsError(try Date.decode(from: .real(-.infinity)))
+    }
+
     // A JSON BLOB that isn't valid UTF-8 (i.e. binary JSONB) must error, not decode to mojibake.
     func testJSONRejectsBinaryJSONB() throws {
         XCTAssertEqual(try SQLiteJSON.decode(from: .blob(Array("{\"a\":1}".utf8))).text, "{\"a\":1}")

@@ -57,6 +57,11 @@ extension Date: SQLiteDecodable {
         case let .integer(i):
             return Date(timeIntervalSince1970: Double(i))
         case let .real(d):
+            // ±Infinity is a legal REAL cell but not a meaningful Julian day — reject it rather than
+            // build a Date with an infinite time interval.
+            guard d.isFinite else {
+                throw sqliteDecodeError("Date", value, "\(d) is not a finite Julian day")
+            }
             return dateFromJulianDay(d)
         case .blob, .null:
             throw sqliteDecodeError("Date", value)

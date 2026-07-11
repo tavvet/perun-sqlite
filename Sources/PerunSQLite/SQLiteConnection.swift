@@ -459,6 +459,11 @@ public actor SQLiteConnection {
         try await _execUninterruptible(kind.beginSQL)
         do {
             let result = try await body(Transaction(connection: self, contextID: contextID))
+            // If the surrounding task was cancelled (e.g. a `withTimeout` deadline) but `body`
+            // swallowed the CancellationError — `try? await Task.sleep(...)` and the like — do not
+            // fall through to the uninterruptible COMMIT. Throw so the catch rolls back, honoring
+            // the documented "a timed-out transaction still rolls back".
+            try Task.checkCancellation()
             // If SQLite auto-rolled-back the transaction under us (and `body` swallowed the error),
             // there is nothing to commit; committing now would be a no-op that hides the break.
             guard try await currentlyInTransaction() else {

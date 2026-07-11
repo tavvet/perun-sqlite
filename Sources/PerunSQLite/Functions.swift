@@ -148,7 +148,14 @@ private func perunSetResult(_ context: OpaquePointer, _ value: SQLiteValue) {
     case let .integer(value):
         sqlite3_result_int64(context, value)
     case let .real(value):
-        sqlite3_result_double(context, value)
+        // Match the bind path: SQLite has no NaN in a REAL cell, so sqlite3_result_double would
+        // silently return SQL NULL. Surface a function error instead. (±Infinity is fine.)
+        if value.isNaN {
+            "function returned Double.nan, which SQLite cannot represent as REAL"
+                .withCString { sqlite3_result_error(context, $0, -1) }
+        } else {
+            sqlite3_result_double(context, value)
+        }
     case let .text(string):
         var string = string
         string.withUTF8 { buffer in
