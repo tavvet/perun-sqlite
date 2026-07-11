@@ -47,17 +47,27 @@ final class SQLiteHandle: @unchecked Sendable {
     /// `isClosed`/`ensureOpen()` guard alone doesn't order against the queued free).
     var closed = false
 
-    // MARK: Interrupt coordination
+    // MARK: Interrupt / cancellation coordination
     //
     // `sqlite3_interrupt` has to be called from a thread *other* than the one blocked in
     // `sqlite3_step`, so which operation is executing can't be tracked in the connection actor (it
     // is suspended across the blocking call) — it lives here, under a mutex, written on the
-    // `ioQueue` around the step and read from the task-cancellation handler. Interrupting only the
-    // generation that is genuinely running is what stops a cancel from hitting a *different*
-    // concurrent operation, or a later one that reused the connection.
+    // `ioQueue` around the step and read from the task-cancellation handler.
+    //
+    // A cancel means one of two things, decided atomically under the lock so there is no gap:
+    //   * the operation is executing now  → `sqlite3_interrupt` it (only *that* generation, never a
+    //     different concurrent one or a later one that reused the connection);
+    //   * the operation is still queued behind other work → record it, so `beginRunning` skips its
+    //     body when the queue reaches it (otherwise a cancelled INSERT would still run and commit,
+    //     and `withTimeout` would report a timeout for a write that landed).
+    //
+    // Generations are handed out (`nextGeneration`) and enqueued on the serial `ioQueue` in the same
+    // order, so by the time generation G runs, every generation < G has already run — `beginRunning`
+    // drops any stale cancellation marks below G, keeping `cancelledGenerations` bounded.
     private let interruptMutex = UnsafeMutablePointer<pthread_mutex_t>.allocate(capacity: 1)
     private var generationCounter: UInt64 = 0
     private var runningGeneration: UInt64?
+    private var cancelledGenerations: Set<UInt64> = []
     private var interruptsDisabled = false
 
     init(_ db: OpaquePointer) {
@@ -78,7 +88,7 @@ final class SQLiteHandle: @unchecked Sendable {
     }
 
     /// A fresh, monotonically increasing operation id. Each cancellable operation takes one and
-    /// carries it into `beginRunning`/`interruptIfRunning`.
+    /// carries it into `beginRunning`/`cancel`.
     func nextGeneration() -> UInt64 {
         withInterruptLock {
             generationCounter += 1
@@ -86,10 +96,20 @@ final class SQLiteHandle: @unchecked Sendable {
         }
     }
 
-    /// Mark `generation` as the operation now executing on the `ioQueue`. Call it on the `ioQueue`,
-    /// immediately before stepping.
-    func beginRunning(_ generation: UInt64) {
-        withInterruptLock { runningGeneration = generation }
+    /// Called on the `ioQueue` immediately before stepping. Returns `false` if this operation's task
+    /// was cancelled while it waited its turn on the queue — the caller then skips the body so its
+    /// side effects never run; otherwise it becomes the operation now executing. Also drops stale
+    /// cancellation marks for generations below this one (they have already run — FIFO order).
+    func beginRunning(_ generation: UInt64) -> Bool {
+        withInterruptLock {
+            let cancelledWhileQueued = cancelledGenerations.remove(generation) != nil
+            if !cancelledGenerations.isEmpty {
+                cancelledGenerations = cancelledGenerations.filter { $0 > generation }
+            }
+            if cancelledWhileQueued { return false }
+            runningGeneration = generation
+            return true
+        }
     }
 
     /// Clear the running marker for `generation`. Call it on the `ioQueue`, immediately after the
@@ -99,15 +119,17 @@ final class SQLiteHandle: @unchecked Sendable {
         withInterruptLock { if runningGeneration == generation { runningGeneration = nil } }
     }
 
-    /// Interrupt the connection *iff* `generation` is the operation currently executing — never a
-    /// different concurrent one, an already-finished one, or one on a closed handle. The lock is
-    /// held across `sqlite3_interrupt` so an adjacent operation can't begin or end underneath the
-    /// decision. (On SQLite < 3.41 an interrupt that still races a step's completion by a few
-    /// instructions can affect the next statement; ≥ 3.41 it is a no-op.)
-    func interruptIfRunning(_ generation: UInt64) {
+    /// From the task-cancellation handler. If `generation` is executing now, interrupt it (holding
+    /// the lock across `sqlite3_interrupt` so an adjacent operation can't begin or end underneath the
+    /// decision); if it is still queued, record it so `beginRunning` skips it. (On SQLite < 3.41 an
+    /// interrupt that still races a step's completion by a few instructions can affect the next
+    /// statement; ≥ 3.41 it is a no-op.)
+    func cancel(_ generation: UInt64) {
         withInterruptLock {
-            if !interruptsDisabled, runningGeneration == generation {
-                sqlite3_interrupt(db)
+            if runningGeneration == generation {
+                if !interruptsDisabled { sqlite3_interrupt(db) }
+            } else {
+                cancelledGenerations.insert(generation)
             }
         }
     }
@@ -118,6 +140,7 @@ final class SQLiteHandle: @unchecked Sendable {
         withInterruptLock {
             interruptsDisabled = true
             runningGeneration = nil
+            cancelledGenerations.removeAll()
         }
     }
 }

@@ -597,7 +597,8 @@ public actor SQLiteConnection {
         let outcome: Result<[SQLiteValue]?, Error> = await withTaskCancellationHandler {
             do {
                 let row: [SQLiteValue]? = try await withBlockingIO(on: ioQueue) {
-                    box.beginRunning(operationGeneration)
+                    // Skip a step whose task was cancelled while queued (see runCancellable).
+                    guard box.beginRunning(operationGeneration) else { throw CancellationError() }
                     defer { box.endRunning(operationGeneration) }
                     // Guard the handle as well as the statement: a concurrent close() nils the stmt
                     // on this same queue, but check closed too so we never step on a closed handle.
@@ -613,7 +614,7 @@ public actor SQLiteConnection {
                 return .failure(error)
             }
         } onCancel: {
-            box.interruptIfRunning(operationGeneration)
+            box.cancel(operationGeneration)
         }
 
         if Task.isCancelled {
@@ -691,7 +692,9 @@ public actor SQLiteConnection {
         let outcome: Result<T, Error> = await withTaskCancellationHandler {
             do {
                 let value = try await withBlockingIO(on: ioQueue) {
-                    box.beginRunning(generation)
+                    // Skip the body if the task was cancelled while this operation waited its turn on
+                    // the queue — don't run (and commit) a write the caller already cancelled.
+                    guard box.beginRunning(generation) else { throw CancellationError() }
                     defer { box.endRunning(generation) }
                     return try body()
                 }
@@ -700,7 +703,7 @@ public actor SQLiteConnection {
                 return .failure(error)
             }
         } onCancel: {
-            box.interruptIfRunning(generation)
+            box.cancel(generation)
         }
         if Task.isCancelled { throw CancellationError() }
         return try outcome.get()

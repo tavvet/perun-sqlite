@@ -293,6 +293,36 @@ final class RegressionTests: XCTestCase {
         XCTAssertEqual(v, .infinity)
     }
 
+    // A write cancelled while still queued behind another operation must NOT run: cancellation
+    // reaches it before it starts, so its side effects must not happen and withTimeout/cancellation
+    // must not report a timeout for a write that actually committed.
+    func testCancelledQueuedWriteDoesNotCommit() async throws {
+        let conn = try await SQLiteConnection.connect(.memory())
+        defer { Task { try? await conn.close() } }
+        try await conn.createFunction("perun_block_ms", argumentCount: 1) { args in
+            guard case let .integer(ms) = args[0] else { return .null }
+            Thread.sleep(forTimeInterval: Double(ms) / 1000.0)
+            return .integer(ms)
+        }
+        try await conn.query("CREATE TABLE t (v INTEGER)")
+
+        // A occupies the connection's queue for ~300ms.
+        async let occupier: Int = conn.query("SELECT perun_block_ms(300) AS v")
+            .rows[0].decode("v", as: Int.self)
+        try await Task.sleep(for: .milliseconds(50))
+
+        // B: an INSERT queued behind A, cancelled while it is still queued (long before A frees the
+        // queue). It must be skipped, not run once the queue drains.
+        let b = Task { try await conn.query("INSERT INTO t (v) VALUES (42)") }
+        try await Task.sleep(for: .milliseconds(10))
+        b.cancel()
+        _ = try? await b.value
+
+        _ = try await occupier
+        let count = try await conn.query("SELECT count(*) AS n FROM t").rows[0].decode("n", as: Int.self)
+        XCTAssertEqual(count, 0, "a queued write cancelled before it ran must not commit")
+    }
+
     // Cancelling one operation must interrupt only that operation — never a different one running
     // concurrently on the same connection. Regression: a single scalar "running" marker let a
     // queued operation's cancellation misfire sqlite3_interrupt at whatever was actually running.
