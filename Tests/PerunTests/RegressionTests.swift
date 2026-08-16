@@ -138,7 +138,7 @@ final class RegressionTests: XCTestCase {
         try await conn.withTransaction { tx in
             try await tx.query("INSERT INTO t VALUES (1)")
             do {
-                try await conn.withTransaction { inner in
+                _ = try await conn.withTransaction { inner in
                     try await inner.query("INSERT INTO t VALUES (2)")
                 }
                 XCTFail("a nested transaction should fail")

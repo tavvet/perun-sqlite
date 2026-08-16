@@ -198,7 +198,9 @@ func parseSQLiteDate(_ string: String) -> Date? {
        scalars[index] == 0x54 || scalars[index] == 0x74
         || (scalars[index] == 0x20 && index + 1 < scalars.count && isDigit(scalars[index + 1])) {
         index += 1
-        guard let h = readInt(maxDigits: 2), (0...23).contains(h), expect(0x3a),   // ':'
+        // SQLite accepts (and preserves) 24:xx as the next civil day, so retain that
+        // convention instead of rejecting text that SQLite itself produces.
+        guard let h = readInt(maxDigits: 2), (0...24).contains(h), expect(0x3a),   // ':'
               let m = readInt(maxDigits: 2), (0...59).contains(m) else { return nil }
         hour = h; minute = m
         if expect(0x3a) {                                           // ':SS' is optional (SQLite allows HH:MM)
@@ -214,15 +216,36 @@ func parseSQLiteDate(_ string: String) -> Date? {
             while index < scalars.count, isDigit(scalars[index]) { index += 1 }   // ignore sub-ns excess
         }
 
-        // Optional timezone offset: ±HH[[:]MM[[:]SS]] or 'Z' — the colons are optional (e.g. +0530).
+        // Optional timezone offset: ±HH, ±HHMM, ±HH:MM[:SS], or 'Z'. Keep the compact
+        // form accepted by earlier releases, but validate every component so malformed database
+        // text (such as +99:99) cannot silently become a different instant.
         if index < scalars.count, scalars[index] == 0x2b || scalars[index] == 0x2d {
             let negative = scalars[index] == 0x2d
             index += 1
-            guard let oh = readInt(maxDigits: 2) else { return nil }
-            _ = expect(0x3a)
-            let om = readInt(maxDigits: 2) ?? 0
-            _ = expect(0x3a)
-            let os = readInt(maxDigits: 2) ?? 0
+            let hourStart = index
+            guard let oh = readInt(maxDigits: 2), index - hourStart == 2,
+                  (0...23).contains(oh) else { return nil }
+
+            var om = 0
+            if expect(0x3a) {
+                let minuteStart = index
+                guard let minute = readInt(maxDigits: 2), index - minuteStart == 2,
+                      (0...59).contains(minute) else { return nil }
+                om = minute
+            } else if index < scalars.count, isDigit(scalars[index]) {
+                let minuteStart = index
+                guard let minute = readInt(maxDigits: 2), index - minuteStart == 2,
+                      (0...59).contains(minute) else { return nil }
+                om = minute
+            }
+
+            var os = 0
+            if expect(0x3a) {
+                let secondStart = index
+                guard let second = readInt(maxDigits: 2), index - secondStart == 2,
+                      (0...59).contains(second) else { return nil }
+                os = second
+            }
             let magnitude = oh * 3600 + om * 60 + os
             offsetSeconds = negative ? -magnitude : magnitude
         } else if index < scalars.count, scalars[index] == 0x5a || scalars[index] == 0x7a {  // 'Z'/'z'

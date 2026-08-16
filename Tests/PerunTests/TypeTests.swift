@@ -130,6 +130,16 @@ final class TypeTests: XCTestCase {
         XCTAssertThrowsError(try Date.decode(from: .text("2024-02-30")))
         XCTAssertThrowsError(try Date.decode(from: .text("2024-13-01")))
         XCTAssertThrowsError(try Date.decode(from: .text("2024-01-01 25:00:00")))
+        XCTAssertThrowsError(try Date.decode(from: .text("2024-01-01 00:00:00+99:99")))
+        XCTAssertThrowsError(try Date.decode(from: .text("2024-01-01 00:00:00+12:60")))
+        XCTAssertThrowsError(try Date.decode(from: .text("2024-01-01 00:00:00+24:00")))
+
+        // SQLite accepts 24:xx and treats it as the following civil day; its text dates must
+        // therefore remain decodable by the driver's SQLite-compatible codec.
+        XCTAssertEqual(
+            try Date.decode(from: .text("2024-01-01 24:01:00")).timeIntervalSince1970,
+            try Date.decode(from: .text("2024-01-02 00:01:00")).timeIntervalSince1970,
+            accuracy: 0.001)
     }
 
     // A non-finite REAL — or a finite-but-huge one that overflows when scaled to seconds — is not a

@@ -2,9 +2,10 @@ import CSQLite
 
 /// A row-level change reported by SQLite's update hook (`sqlite3_update_hook`).
 ///
-/// This is the closest embedded analogue of PostgreSQL's LISTEN/NOTIFY: it fires for every
-/// insert / update / delete on the *owning connection* (not across connections), so it observes
-/// this connection's own writes. Delivered on `SQLiteConnection.dataChanges` when the
+/// This is the closest embedded analogue of PostgreSQL's LISTEN/NOTIFY: it reports row changes on
+/// the *owning connection* (not across connections). It is a best-effort rowid-table hook, not a
+/// stream of committed transactions: SQLite does not invoke it for `WITHOUT ROWID` tables and a
+/// delivered event may later be rolled back. Delivered on `SQLiteConnection.dataChanges` when the
 /// configuration sets `observeDataChanges`.
 public struct SQLiteChange: Sendable, Equatable {
     public enum Operation: Sendable, Equatable {

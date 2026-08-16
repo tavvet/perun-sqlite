@@ -184,8 +184,8 @@ Tests/PerunTests/     value/type/result/error unit tests + connection/pool/extra
 
 ## Status
 
-`0.x` — pre-1.0, so the API may still change. The driver is complete and verified: `swift test`
-(46 tests) and `swift run perun-demo` pass end to end against in-memory and temporary-file databases,
+`v0.1.3` — pre-1.0, so the API may still change. The driver is complete and verified: `swift test`
+(69 tests) and `swift run perun-demo` pass end to end against in-memory and temporary-file databases,
 on both macOS (SQLite 3.51) and Linux (SQLite 3.45). The public surface is deliberately general — it
 runs SQL and returns typed rows. Query building, models and migrations are concerns for code built
 *on top* of the driver, not for the driver itself.

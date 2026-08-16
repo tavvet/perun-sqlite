@@ -4,8 +4,8 @@ Observing row inserts, updates, and deletes as they happen.
 
 ## Observing changes
 
-SQLite's update hook is the closest embedded analogue of PostgreSQL's `LISTEN`/`NOTIFY`: it fires
-for every insert, update, and delete on the connection. Opt in with
+SQLite's update hook is the closest embedded analogue of PostgreSQL's `LISTEN`/`NOTIFY`: it reports
+row-level work performed on the connection. Opt in with
 ``SQLiteConfiguration/observeDataChanges``, then consume ``SQLiteConnection/dataChanges``, an
 `AsyncStream` of ``SQLiteChange``:
 
@@ -29,6 +29,12 @@ the ``SQLiteChange/database`` (usually `"main"`), and the affected ``SQLiteChang
 - It observes **this connection's own writes**, not changes made by other connections — it is a local
   hook, not a cross-connection channel. (A pooled writer's changes are seen by whichever pooled
   connection made them.)
+- It is **not a commit stream**: an event can be delivered for a row change that a later `ROLLBACK`
+  undoes. Do not use it as confirmation that a transaction committed.
+- It covers SQLite **rowid tables** only. `WITHOUT ROWID` tables and internal system tables do not
+  trigger it; SQLite also omits some deletes caused by `ON CONFLICT REPLACE` and by its truncate
+  optimization. If every durable change matters, record an application-level event in the same
+  transaction instead.
 - It reports the fact of a change, not the old or new row values — read those with a query if needed.
 - Events are buffered (newest-wins beyond a bound), so writes may happen before the consumer drains
   them; order is preserved.
