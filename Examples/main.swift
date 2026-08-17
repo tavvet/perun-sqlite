@@ -1,7 +1,7 @@
 import PerunSQLite
 
 // Runnable, compile-checked examples that back the documentation. Run one with
-// `swift run Examples <scenario>`. Every scenario uses an in-memory or temporary-file database, so
+// `swift run PerunSQLiteExamples <scenario>`. Every scenario uses an in-memory or temporary-file database, so
 // none of them needs an external server.
 
 let scenario = CommandLine.arguments.dropFirst().first ?? ""
@@ -16,6 +16,6 @@ case "functions":      try await runFunctions()
 case "backup":         try await runBackup()
 case "hooks":          try await runHooks()
 default:
-    print("usage: swift run Examples <scenario>")
+    print("usage: swift run PerunSQLiteExamples <scenario>")
     print("scenarios: basic-query, transactions, streaming, pool, error-handling, custom-type, functions, backup, hooks")
 }

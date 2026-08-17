@@ -77,5 +77,6 @@ await pool.shutdown()
 - <doc:DecodingAndEncoding> — the type system and custom codecs.
 - <doc:ErrorsAndRecovery> — the error model, reusability, cancellation, and timeouts.
 
-The `Examples/` directory holds small runnable programs; run one with `swift run Examples basic-query`.
+The `Examples/` directory holds small runnable programs; run one with
+`swift run PerunSQLiteExamples basic-query`.
 Every scenario uses an in-memory or temporary-file database, so none needs any setup.

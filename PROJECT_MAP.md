@@ -22,7 +22,7 @@
 - extras: data-change hooks (`sqlite3_update_hook`), online backup (`sqlite3_backup_*`),
   пользовательские SQL-функции (`sqlite3_create_function_v2`).
 
-Публичная библиотека: `PerunSQLite`. Демо-таргет: `perun-demo`.
+Публичная библиотека: `PerunSQLite`. Демо-продукт: `perun-sqlite-demo`.
 
 ## Package Layout
 
@@ -51,10 +51,10 @@ Sources/
       ScalarTypes.swift
       FoundationTypes.swift
       JSON.swift
-  perun-demo/
+  PerunSQLiteDemo/
     Demo.swift
 Examples/
-Tests/PerunTests/
+Tests/PerunSQLiteTests/
 ```
 
 ## Target Map
@@ -79,7 +79,7 @@ System library target, экспонирующий `libsqlite3` в Swift.
   блокирующий `sqlite3_step` (может ждать на busy-локе) не занимал кооперативный пул.
 - Драйвер возвращает `QueryResult`, `SQLiteRow`, `SQLiteCell`, несущие `SQLiteValue`.
 
-### `perun-demo` / `Examples`
+### `PerunSQLiteDemo` / `PerunSQLiteExamples`
 
 Запускаемые программы, демонстрирующие весь путь против `:memory:`/временного файла. **Внешний
 сервер не нужен** (в отличие от perun-pgsql).
@@ -328,7 +328,7 @@ perun-pgsql). Текстовый парсер `parseSQLiteDate` терпим к 
 
 ## Tests
 
-Весь набор (`Tests/PerunTests/`) гоняется **офлайн против `:memory:`** (и временных файлов для пула/
+Весь набор (`Tests/PerunSQLiteTests/`) гоняется **офлайн против `:memory:`** (и временных файлов для пула/
 бэкапа) — никакого integration-гейта.
 
 - `SmokeTests` — базовые инварианты `SQLiteValue`/`SQLiteResultCode`.
@@ -351,11 +351,11 @@ perun-pgsql). Текстовый парсер `parseSQLiteDate` терпим к 
 
 ```bash
 swift test            # весь набор, без внешнего сервера
-swift run perun-demo  # end-to-end тур
-swift build           # библиотека + demo + Examples (компилируемая проверка примеров)
+swift run perun-sqlite-demo       # end-to-end тур
+swift build                       # библиотека + demo + examples (компилируемая проверка примеров)
 ```
 
-Наблюдаемо: 35 тестов зелёные; демо проходит целиком (schema/params/typed select/transaction/
+Наблюдаемо: 69 тестов зелёные; демо проходит целиком (schema/params/typed select/transaction/
 prepared/stream/function/hook/backup/pool).
 
 ## Where To Start When Changing Things

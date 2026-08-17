@@ -17,7 +17,7 @@ let package = Package(
     ],
     products: [
         .library(name: "PerunSQLite", targets: ["PerunSQLite"]),
-        .executable(name: "perun-demo", targets: ["perun-demo"]),
+        .executable(name: "perun-sqlite-demo", targets: ["PerunSQLiteDemo"]),
     ],
     dependencies: packageDependencies,
     targets: [
@@ -40,14 +40,14 @@ let package = Package(
 
         // A tiny runnable program that opens a database and runs queries.
         .executableTarget(
-            name: "perun-demo",
+            name: "PerunSQLiteDemo",
             dependencies: ["PerunSQLite"]
         ),
 
         // Runnable, compile-checked examples that back the documentation. `swift build` compiles
         // them, so a doc example can't drift from the real API.
         .executableTarget(
-            name: "Examples",
+            name: "PerunSQLiteExamples",
             dependencies: ["PerunSQLite"],
             path: "Examples"
         ),
@@ -55,7 +55,7 @@ let package = Package(
         // Unit tests for the value model, type codecs, result rows and error classification.
         // They run entirely against in-memory databases — no external server needed.
         .testTarget(
-            name: "PerunTests",
+            name: "PerunSQLiteTests",
             dependencies: ["PerunSQLite"]
         ),
     ]

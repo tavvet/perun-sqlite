@@ -4,6 +4,13 @@ All notable changes to perun-sqlite are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-18
+
+### Changed
+
+- Rename development targets to `PerunSQLiteDemo`, `PerunSQLiteExamples`, and
+  `PerunSQLiteTests`; rename the demo executable product to `perun-sqlite-demo`.
+
 ## [0.1.3] - 2026-08-16
 
 ### Fixed
@@ -58,6 +65,7 @@ shape of perun-pgsql. Pre-1.0, so the API may still change.
   `Examples/`; and a suite of 46 tests that runs entirely offline against in-memory databases,
   verified on macOS (SQLite 3.51) and Linux (SQLite 3.45).
 
+[0.2.0]: https://github.com/tavvet/perun-sqlite/releases/tag/0.2.0
 [0.1.3]: https://github.com/tavvet/perun-sqlite/releases/tag/0.1.3
 [0.1.2]: https://github.com/tavvet/perun-sqlite/releases/tag/0.1.2
 [0.1.1]: https://github.com/tavvet/perun-sqlite/releases/tag/0.1.1

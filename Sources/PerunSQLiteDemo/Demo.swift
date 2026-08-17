@@ -1,8 +1,8 @@
 import PerunSQLite
 import Foundation
 
-// An end-to-end tour of the driver against an in-memory database. Unlike perun-demo for
-// PostgreSQL, this needs no server — just `swift run perun-demo`.
+// An end-to-end tour of the driver against an in-memory database. Unlike the PostgreSQL demo,
+// this needs no server — just `swift run perun-sqlite-demo`.
 @main
 struct Demo {
     static func main() async {
@@ -102,7 +102,7 @@ struct Demo {
         try await connection.close()
 
         // 8. A pool over a temporary file, fanning out concurrent reads.
-        let path = NSTemporaryDirectory() + "perun-demo-\(UUID().uuidString).db"
+        let path = NSTemporaryDirectory() + "perun-sqlite-demo-\(UUID().uuidString).db"
         defer { try? FileManager.default.removeItem(atPath: path) }
         let pool = SQLiteClient(configuration: .file(path, journalMode: .wal), maxConnections: 4)
         try await pool.query("CREATE TABLE t (v INTEGER)")

@@ -113,14 +113,14 @@ Pages → Source = "GitHub Actions").
 
 ```bash
 swift test                       # the whole suite — runs entirely against in-memory databases
-swift run perun-demo             # an end-to-end tour (schema, params, transaction, stream, pool,
+swift run perun-sqlite-demo      # an end-to-end tour (schema, params, transaction, stream, pool,
                                  # function, change hook, backup) — no server needed
-swift run Examples basic-query   # a single runnable example
+swift run PerunSQLiteExamples basic-query   # a single runnable example
 ```
 
 Unlike perun-pgsql, **no external server is required for any test** — SQLite is embedded, so the
 suite opens `:memory:` (and temporary files for the pool/backup) and needs nothing else. Runnable,
-compile-checked examples live in [`Examples/`](Examples): `swift run Examples <scenario>` (e.g.
+compile-checked examples live in [`Examples/`](Examples): `swift run PerunSQLiteExamples <scenario>` (e.g.
 `basic-query`, `transactions`, `streaming`, `pool`, `error-handling`, `custom-type`, `functions`,
 `backup`, `hooks`).
 
@@ -177,15 +177,15 @@ Sources/
     Backup.swift             online backup API
     Functions.swift          custom SQL functions
     Types/                   SQLiteDecodable + scalar/Foundation/JSON codecs
-  perun-demo/         a small end-to-end program
-Examples/             runnable, compile-checked examples (swift run Examples <scenario>)
-Tests/PerunTests/     value/type/result/error unit tests + connection/pool/extras integration
+  PerunSQLiteDemo/    a small end-to-end program
+Examples/             runnable, compile-checked examples (swift run PerunSQLiteExamples <scenario>)
+Tests/PerunSQLiteTests/ value/type/result/error unit tests + connection/pool/extras integration
 ```
 
 ## Status
 
-`v0.1.3` — pre-1.0, so the API may still change. The driver is complete and verified: `swift test`
-(69 tests) and `swift run perun-demo` pass end to end against in-memory and temporary-file databases,
+Current release: `v0.2.0`. The package remains pre-1.0, so its API may still change. It is verified
+with `swift test` (69 tests) and `swift run perun-sqlite-demo` against in-memory and temporary-file databases,
 on both macOS (SQLite 3.51) and Linux (SQLite 3.45). The public surface is deliberately general — it
 runs SQL and returns typed rows. Query building, models and migrations are concerns for code built
 *on top* of the driver, not for the driver itself.
